@@ -38,7 +38,7 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -310,6 +310,22 @@ async def run_monitor(target: date | None = None) -> dict:
         except Exception as exc:
             logger.warning("[monitor] reconciliation failed (계속 진행): %s", exc)
             out["reconciliation_error"] = str(exc)
+
+        # --- (2.5) 보호 stop 자동 재발송 — 보유 포지션 중 SELL stop이 없는 종목 감지·발송 ---
+        # (2026-05-14 사고 follow-up: bracket 자식이 broker 측에서 사라져도 monitor가 복구)
+        try:
+            protect_result = await _ensure_protective_stops(adapter, target)
+            out["protective_stops"] = protect_result
+            if protect_result.get("added"):
+                send_heartbeat(
+                    phase="monitor",
+                    status="alert",
+                    message=f"🛡 보호 stop 자동 재발송: {len(protect_result['added'])}건",
+                    details=protect_result,
+                )
+        except Exception as exc:
+            logger.warning("[monitor] protective_stops failed (계속 진행): %s", exc)
+            out["protective_stops_error"] = str(exc)
 
         # --- (3) Per-plan: 1차 hit → 2차 stop raise ---
         async with async_session_factory() as session:
@@ -979,6 +995,131 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
     finally:
         await adapter.close()
 
+    return out
+
+
+async def _ensure_protective_stops(adapter, target: date) -> dict:
+    """보유 포지션 중 SELL stop이 없는 종목에 자동으로 stop sell 발송.
+
+    트리거 조건: 보유 qty > 0 + 같은 symbol의 open SELL stop / stop_limit 없음
+    Stop 가격 결정:
+      1) trade_plans.stop_price (해당 종목, 가장 최근 date) — 우선
+      2) avg_entry_price × (1 - FALLBACK_PCT) — plan 없으면 fallback (기본 5%)
+
+    발송: alpaca-py StopOrderRequest, time_in_force=GTC
+    AUTO_TRADE_ENABLED=false면 dry-run으로 로그만.
+    """
+    import os
+    from sqlalchemy import select
+    from api.db.models import TradePlan
+    from api.db.session import async_session_factory
+
+    out: dict = {
+        "checked": [],
+        "already_protected": [],
+        "added": [],
+        "skipped": [],
+        "errors": [],
+    }
+
+    positions = await adapter.get_positions()
+    if not positions:
+        out["status"] = "no_positions"
+        return out
+
+    open_orders = await adapter.get_orders(status="open")
+    # 종목별 SELL stop 보유 여부
+    has_sell_stop: dict[str, bool] = {}
+    for o in open_orders:
+        if o.side.lower() == "sell" and "stop" in o.order_type.lower():
+            has_sell_stop[o.symbol.upper()] = True
+
+    fallback_pct = float(os.environ.get("PROTECTIVE_STOP_FALLBACK_PCT", "5.0"))
+    auto_trade = os.environ.get("AUTO_TRADE_ENABLED", "false").strip().lower() == "true"
+
+    # plan 조회 (오늘 + 최근 30일 — 다음날 보유 가능성)
+    async with async_session_factory() as session:
+        cutoff = target - timedelta(days=30)
+        plan_stmt = (
+            select(TradePlan)
+            .where(TradePlan.plan_date >= cutoff)
+            .where(TradePlan.plan_date <= target)
+            .order_by(TradePlan.plan_date.desc(), TradePlan.id.desc())
+        )
+        all_plans = list((await session.execute(plan_stmt)).scalars().all())
+    plan_by_symbol: dict[str, TradePlan] = {}
+    for p in all_plans:
+        key = p.symbol.upper()
+        if key not in plan_by_symbol:  # 최근 plan 우선
+            plan_by_symbol[key] = p
+
+    for pos in positions:
+        sym = pos.symbol.upper()
+        out["checked"].append(sym)
+        if has_sell_stop.get(sym):
+            out["already_protected"].append(sym)
+            continue
+        if pos.qty <= 0:
+            out["skipped"].append({"symbol": sym, "reason": "qty_zero"})
+            continue
+
+        plan = plan_by_symbol.get(sym)
+        if plan and plan.stop_price:
+            stop_price = float(plan.stop_price)
+            source = f"plan(id={plan.id}, date={plan.plan_date})"
+        else:
+            # fallback: avg_entry × (1 - fallback_pct/100)
+            stop_price = round(pos.avg_entry_price * (1 - fallback_pct / 100), 2)
+            source = f"fallback(avg_entry × {1 - fallback_pct/100:.3f})"
+
+        if stop_price >= pos.current_price:
+            # 현재가가 이미 stop 아래로 떨어진 경우 — stop 발송하면 즉시 trigger
+            # 보수적으로 skip + alert
+            out["skipped"].append({
+                "symbol": sym,
+                "reason": f"stop_price ${stop_price:.2f} >= current ${pos.current_price:.2f} — 즉시 trigger 위험",
+                "stop_price": stop_price,
+                "current_price": pos.current_price,
+                "source": source,
+            })
+            continue
+
+        if not auto_trade:
+            logger.warning(
+                "[monitor.protect] [DRY RUN] %s qty=%d stop=$%.2f (%s) — AUTO_TRADE_ENABLED=false",
+                sym, pos.qty, stop_price, source,
+            )
+            out["added"].append({
+                "symbol": sym, "qty": pos.qty, "stop_price": stop_price,
+                "source": source, "dry_run": True,
+            })
+            continue
+
+        # 실 발송
+        try:
+            from alpaca.trading.requests import StopOrderRequest
+            from alpaca.trading.enums import OrderSide, TimeInForce
+
+            req = StopOrderRequest(
+                symbol=sym, qty=pos.qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC, stop_price=stop_price,
+            )
+            submitted = await asyncio.to_thread(adapter._client.submit_order, order_data=req)
+            order_id = str(submitted.id)
+            logger.info(
+                "[monitor.protect] %s qty=%d stop=$%.2f (%s) order_id=%s",
+                sym, pos.qty, stop_price, source, order_id[:12],
+            )
+            out["added"].append({
+                "symbol": sym, "qty": pos.qty, "stop_price": stop_price,
+                "source": source, "order_id": order_id, "avg_entry": pos.avg_entry_price,
+                "current_price": pos.current_price,
+            })
+        except Exception as exc:
+            logger.exception("[monitor.protect] %s submit failed", sym)
+            out["errors"].append({"symbol": sym, "error": f"{exc.__class__.__name__}: {exc}"})
+
+    out["status"] = "ok"
     return out
 
 
