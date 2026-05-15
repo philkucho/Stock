@@ -15,6 +15,7 @@ run_intraday_check(symbol, target, trigger_reason):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import date, datetime, timezone
@@ -214,7 +215,8 @@ async def run_intraday_check(
         out["error"] = str(exc)
         return out
 
-    client = ClaudeAdvisorClient()
+    # provider는 ADVISOR_PROVIDER 환경변수로 결정 — morning_brief와 동일 경로
+    client = get_advisor_client()
     try:
         text, usage = await client.call(
             prompt_name="intraday_check",
@@ -223,7 +225,7 @@ async def run_intraday_check(
             temperature=0.2,
         )
     except Exception as exc:
-        logger.exception("[advisor.intraday] claude call failed")
+        logger.exception("[advisor.intraday] LLM call failed")
         out["status"] = "claude_error"
         out["error"] = str(exc)
         return out
@@ -253,7 +255,7 @@ async def run_intraday_check(
     rec_type_map = {
         "enter": "intraday_entry",
         "add": "intraday_add",
-        "trim": "intraday_exit",
+        "trim": "intraday_trim",
         "exit": "intraday_exit",
         "hold": "intraday_hold",
     }
@@ -432,15 +434,60 @@ async def approve_recommendation(
         await session.commit()
         return {"status": "expired", "message": "TTL 경과 — 자동 만료"}
 
-    # intraday_exit는 별도 처리 (Phase 2)
-    if rec.rec_type == "intraday_exit":
+    # intraday_exit / intraday_trim: 즉시 매도 발송 (2026-05-15 도입)
+    if rec.rec_type in ("intraday_exit", "intraday_trim"):
+        from broker_adapter import get_adapter
+
+        adapter = get_adapter()
+        sell_result: dict[str, Any] = {}
+        try:
+            pos = await adapter.get_position(rec.symbol)
+            if pos is None or pos.qty <= 0:
+                sell_result = {"status": "no_position", "reason": "보유 없음"}
+            elif rec.rec_type == "intraday_exit":
+                # 전량 시장가 매도 (close_position이 자동으로 미체결 자식까지 cancel)
+                ok = await adapter.close_position(rec.symbol)
+                sell_result = {
+                    "status": "ok" if ok else "broker_error",
+                    "action": "close_position",
+                    "qty": pos.qty,
+                }
+            else:  # intraday_trim → 보유 50%
+                sell_qty = max(1, pos.qty // 2)
+                try:
+                    from alpaca.trading.requests import MarketOrderRequest
+                    from alpaca.trading.enums import OrderSide, TimeInForce
+
+                    req = MarketOrderRequest(
+                        symbol=rec.symbol.upper(),
+                        qty=sell_qty,
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.DAY,
+                    )
+                    submitted = await asyncio.to_thread(
+                        adapter._client.submit_order, order_data=req
+                    )
+                    sell_result = {
+                        "status": "ok",
+                        "action": "trim_50pct",
+                        "qty_sold": sell_qty,
+                        "qty_remaining": pos.qty - sell_qty,
+                        "order_id": str(submitted.id),
+                    }
+                except Exception as exc:
+                    logger.exception("[advisor.approve] trim submit failed for %s", rec.symbol)
+                    sell_result = {"status": "broker_error", "reason": str(exc)}
+        finally:
+            await adapter.close()
+
         rec.status = "approved"
         rec.user_decision_at = datetime.now(timezone.utc)
         await session.commit()
         return {
             "status": "approved",
             "rec_type": rec.rec_type,
-            "message": "intraday_exit approved — 장중 monitor에서 청산 처리 (Phase 2)",
+            "execution": sell_result,
+            "message": f"{rec.rec_type} approved — {sell_result.get('action', sell_result.get('status'))}",
         }
 
     # morning / intraday_entry / intraday_add → trade_plan upsert
@@ -522,12 +569,24 @@ async def approve_recommendation(
     rec.trade_plan_id = plan_id
     await session.commit()
 
+    # 즉시 매수 발송 (2026-05-15 도입) — intraday_entry/intraday_add는 다음 09:30 cron 안 기다리고
+    # 지금 발송. morning_brief도 같은 흐름. 안전장치는 dispatch_plan_immediately 내부에서 동일 적용.
+    dispatch_result: dict[str, Any] = {}
+    if plan_id is not None and rec.rec_type in ("morning_brief", "intraday_entry", "intraday_add"):
+        try:
+            from scripts.daily_pipeline import dispatch_plan_immediately
+            dispatch_result = await dispatch_plan_immediately(plan_id)
+        except Exception as exc:
+            logger.exception("[advisor.approve] immediate dispatch failed for plan %s", plan_id)
+            dispatch_result = {"status": "error", "reason": str(exc)}
+
     return {
         "status": "approved",
         "rec_type": rec.rec_type,
         "trade_plan_id": plan_id,
         "shares": shares,
         "amount_usd": round(shares * entry, 2),
+        "dispatch": dispatch_result or {"status": "deferred_to_cron"},
     }
 
 

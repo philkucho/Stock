@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db import engine, get_session
 from api.routes import (
+    activity,
     advisor,
     assignments,
     backtests,
@@ -125,6 +126,7 @@ app.include_router(comparison.router, prefix="/api/comparison", tags=["compariso
 app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
 app.include_router(review.router, prefix="/api/review", tags=["review"])
 app.include_router(advisor.router, prefix="/api/advisor", tags=["advisor"])
+app.include_router(activity.router, prefix="/api/activity", tags=["activity"])
 app.include_router(telegram.router, prefix="/api/telegram", tags=["telegram"])
 app.include_router(
     market_diagnosis.router,

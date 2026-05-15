@@ -94,6 +94,15 @@ const TABS: Tab[] = [
       "border-2 border-cyan-500 bg-cyan-200 text-cyan-900 font-bold dark:border-cyan-400 dark:bg-cyan-700 dark:text-white",
   },
   {
+    href: "/activity",
+    label: "📜 활동 기록",
+    title: "시스템 ↔ AI 자문 ↔ Telegram ↔ Broker 모든 이벤트 시간순 통합",
+    inactive:
+      "border-pink-300 bg-pink-50 text-pink-700 hover:bg-pink-100 dark:border-pink-900 dark:bg-pink-950/40 dark:text-pink-300 dark:hover:bg-pink-950",
+    active:
+      "border-2 border-pink-500 bg-pink-200 text-pink-900 font-bold dark:border-pink-400 dark:bg-pink-700 dark:text-white",
+  },
+  {
     href: "/strategies",
     label: "Strategies",
     title: "전략 프리셋 / 활성 전략",

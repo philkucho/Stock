@@ -34,7 +34,7 @@ DEDUPE_WINDOW_MIN = 30
 
 
 async def run_intraday_loop_iteration(
-    session: AsyncSession, target: date
+    session: AsyncSession, target: date, *, force_check: bool = False
 ) -> dict[str, Any]:
     """1회 실행. cron이 매 15분 호출.
 
@@ -42,10 +42,14 @@ async def run_intraday_loop_iteration(
       1. 오늘의 trade_plan(broker_order_ids 발송된 것) + 현재 broker 포지션 = 모니터 대상 set
       2. 각 종목에 대해 트리거 조건 평가
       3. 충족 시 dedupe 체크 후 run_intraday_check 호출
+
+    force_check=True (매 시간 정기 검토 cron 용): 트리거/dedupe 평가 skip, monitor set 전종목에 대해
+    "hourly_check" 트리거로 LLM 호출. 비용 발생.
     """
     out: dict[str, Any] = {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "advisor_enabled": os.environ.get("ADVISOR_ENABLED", "false").strip().lower() == "true",
+        "force_check": force_check,
         "symbols_checked": [],
         "triggered": [],
         "skipped_dedupe": [],
@@ -59,18 +63,21 @@ async def run_intraday_loop_iteration(
     out["monitor_set"] = sorted(symbols)
 
     for sym in symbols:
-        try:
-            triggers = await _evaluate_triggers(sym)
-        except Exception as exc:
-            logger.warning("[intraday] %s evaluate failed: %s", sym, exc)
-            out["errors"].append({"symbol": sym, "stage": "trigger", "error": str(exc)})
-            continue
+        if force_check:
+            triggers = ["hourly_check"]
+        else:
+            try:
+                triggers = await _evaluate_triggers(sym)
+            except Exception as exc:
+                logger.warning("[intraday] %s evaluate failed: %s", sym, exc)
+                out["errors"].append({"symbol": sym, "stage": "trigger", "error": str(exc)})
+                continue
 
         out["symbols_checked"].append({"symbol": sym, "triggers": triggers})
         if not triggers:
             continue
 
-        if await has_recent_intraday(session, sym, window_minutes=DEDUPE_WINDOW_MIN):
+        if not force_check and await has_recent_intraday(session, sym, window_minutes=DEDUPE_WINDOW_MIN):
             out["skipped_dedupe"].append(sym)
             continue
 

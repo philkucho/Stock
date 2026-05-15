@@ -1093,3 +1093,45 @@ export async function fetchPositions(): Promise<Position[]> {
   if (!res.ok) throw new Error(`Positions fetch failed: ${res.status}`);
   return res.json();
 }
+
+// ── Activity log (시간순 통합 타임라인) ──
+
+export type ActivityEvent = {
+  ts: string; // ISO datetime
+  type: string;
+  symbol: string | null;
+  summary: string;
+  details: Record<string, unknown>;
+};
+
+export type ActivitySummary = {
+  picks_count: number;
+  advisor_recommendations: number;
+  advisor_approved: number;
+  advisor_rejected: number;
+  advisor_expired: number;
+  plans_sent: number;
+  broker_orders: number;
+  broker_filled: number;
+  broker_canceled: number;
+  realized_pnl_usd: number;
+};
+
+export type ActivityResponse = {
+  date: string;
+  events: ActivityEvent[];
+  summary: ActivitySummary;
+  symbols: string[];
+};
+
+export async function fetchActivity(
+  date: string,
+  symbol?: string,
+): Promise<ActivityResponse> {
+  const qs = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+  const res = await fetch(`${API_BASE}/api/activity/${date}${qs}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Activity fetch failed: ${res.status}`);
+  return res.json();
+}

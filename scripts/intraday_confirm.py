@@ -423,7 +423,9 @@ async def run_confirm(target: date, *, dry_run: bool = False) -> dict:
                         symbol=sym, qty=qty, side="BUY",
                         entry_type="stop_limit",
                         entry_price=entry, stop_loss_price=stop,
-                        time_in_force="day", is_two_tier=True,
+                        # GTC: parent+child가 마감 후에도 살아있어야 stop/tp 보호가 유지됨.
+                        # (DAY는 자식이 9:35경 expire/cancel되는 사고가 발생 — 2026-05-14 사고)
+                        time_in_force="gtc", is_two_tier=True,
                         target_1_price=t1, target_1_qty=qty_1,
                         target_2_price=t2, target_2_qty=qty_2,
                     )
@@ -432,7 +434,7 @@ async def run_confirm(target: date, *, dry_run: bool = False) -> dict:
                         symbol=sym, qty=qty, side="BUY",
                         entry_type="stop_limit",
                         entry_price=entry, stop_loss_price=stop,
-                        take_profit_price=t1, time_in_force="day",
+                        take_profit_price=t1, time_in_force="gtc",
                     )
 
                 try:

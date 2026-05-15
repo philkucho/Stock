@@ -37,6 +37,124 @@ def _enabled() -> bool:
     return os.environ.get("HEARTBEAT_ENABLED", "false").strip().lower() == "true"
 
 
+def _telegram_alert_enabled() -> bool:
+    """Telegram alert는 별도 마스터 스위치. TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID 모두 있고
+    TELEGRAM_ALERT_ENABLED != 'false'일 때 활성. 기본은 활성(키만 있으면 보냄)."""
+    if not (os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")):
+        return False
+    return os.environ.get("TELEGRAM_ALERT_ENABLED", "true").strip().lower() != "false"
+
+
+def _suggest_action(error_message: str, phase: str) -> str:
+    """에러 메시지 → 한글 조치 가이드. 시스템 alert에 포함되어 사용자가 즉시 대응."""
+    m = (error_message or "").lower()
+    if "getaddrinfo failed" in m or "could not resolve host" in m or "nameresolution" in m or "dns" in m:
+        return (
+            "• DNS 해석 실패 — 보통 재부팅 직후 Tailscale DNS hook 안정화 전 일시적\n"
+            "• Tailscale 상태 확인: 트레이 아이콘 → Health check에 DNS 경고 있나\n"
+            "• 5~10분 후 자동 재시도되며 정상화 가능성 큼\n"
+            f"• 안 풀리면 phase 수동 재실행: python -m scripts.daily_pipeline --phase {phase}"
+        )
+    if "trading_blocked" in m or "account_trading_blocked" in m:
+        return (
+            "• Alpaca 계정 차단 상태\n"
+            "• 콘솔(https://app.alpaca.markets/paper/dashboard) 확인 필요"
+        )
+    if "insufficient_buying_power" in m or "buying_power" in m:
+        return (
+            "• 구매력 부족\n"
+            "• plan 금액 축소 또는 Alpaca paper Reset"
+        )
+    if "regime defensive" in m or "long_blocked" in m or "regime.*block" in m:
+        return (
+            "• Regime defensive mode — 시스템 정상 차단 동작\n"
+            "• 시장 회복 시 자동 해제, 추가 조치 불필요"
+        )
+    if "rate_limit" in m or "429" in m or "resource_exhausted" in m or "quota" in m:
+        return (
+            "• Rate limit 또는 quota 초과\n"
+            "• 잠시 후 재시도 또는 ADVISOR_MODEL을 gemini-2.5-flash로 변경"
+        )
+    if "permission_denied" in m or "403" in m or "service_disabled" in m:
+        return (
+            "• API 권한 거부\n"
+            "• GCP project에서 Gemini API 활성화 또는 API 키 재발급 확인"
+        )
+    if "yfinance" in m or "yahoo" in m or "delisted" in m:
+        return (
+            "• yfinance Yahoo Finance 데이터 fetch 실패 (외부 일시적 장애 가능)\n"
+            "• 다음 cron에서 자동 정상화 예상"
+        )
+    if "broker_order_ids" in m or "place_bracket_order" in m or "order_fail" in m:
+        return (
+            "• broker 주문 발송 실패\n"
+            "• Alpaca 상태 확인 + 가격/qty/buying_power 검증"
+        )
+    if "drift" in m or "discrepancies" in m or "unexpected_holding" in m:
+        return (
+            "• Broker 보유 vs DB plan 불일치\n"
+            "• /activity 페이지에서 broker 주문 vs plan 비교 권장"
+        )
+    return (
+        "• 자세한 traceback은 logs/daily_pipeline/{날짜}.log 확인\n"
+        f"• phase 수동 재실행: python -m scripts.daily_pipeline --phase {phase}"
+    )
+
+
+def _send_telegram_alert(phase: str, status: str, message: str, details: dict | None) -> None:
+    """Telegram에 시스템 alert 발송 — failed/alert/blocked만. completed/started는 skip."""
+    if status not in ("failed", "alert", "blocked"):
+        return
+    if not _telegram_alert_enabled():
+        return
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (token and chat_id):
+        return
+
+    tag = _STATUS_TAG.get(status, status.upper())
+    err_type = ""
+    err_msg = ""
+    if details:
+        err_type = str(details.get("error_type") or "")
+        err_msg = str(details.get("error_message") or "")
+    suggestion = _suggest_action(err_msg or message, phase)
+
+    ts = datetime.now().strftime("%H:%M:%S")
+    text_lines = [
+        f"{tag} <b>daily_pipeline.{phase}</b>",
+        f"<i>{ts}</i>",
+        "",
+    ]
+    if message:
+        text_lines.append(f"📝 {message}")
+    if err_type or err_msg:
+        snippet = (err_msg[:300] + "…") if len(err_msg) > 300 else err_msg
+        text_lines.append(f"❗ <b>{err_type}</b>: <code>{snippet}</code>")
+    text_lines.append("")
+    text_lines.append("💡 <b>조치</b>")
+    text_lines.append(suggestion)
+
+    body = "\n".join(text_lines)
+
+    try:
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": int(chat_id),
+                    "text": body,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+            )
+    except Exception as exc:
+        # Telegram 실패는 silent — 본 pipeline 영향 X
+        logger.warning("telegram alert failed: %s", exc)
+
+
 def send_heartbeat(
     phase: str,
     status: str,
@@ -55,6 +173,9 @@ def send_heartbeat(
         logger.info(log_line)
     else:
         logger.warning(log_line)
+
+    # Telegram alert (failed/alert/blocked만, HEARTBEAT_ENABLED와 독립)
+    _send_telegram_alert(phase, status, message, details)
 
     if not _enabled():
         return

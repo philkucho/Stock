@@ -919,7 +919,9 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
                     entry_type="stop_limit",
                     entry_price=entry,
                     stop_loss_price=stop,
-                    time_in_force="day",
+                    # GTC: parent+child가 마감 후에도 살아있어야 stop/tp 보호가 유지됨.
+                    # (DAY는 자식이 9:35경 expire/cancel되는 사고가 발생 — 2026-05-14 사고)
+                    time_in_force="gtc",
                     is_two_tier=True,
                     target_1_price=t1, target_1_qty=qty_1,
                     target_2_price=t2, target_2_qty=qty_2,
@@ -934,7 +936,7 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
                     entry_price=entry,
                     stop_loss_price=stop,
                     take_profit_price=t1,
-                    time_in_force="day",
+                    time_in_force="gtc",
                 )
 
             try:
@@ -980,11 +982,157 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
     return out
 
 
-async def run_intraday_loop(target: date) -> dict:
+async def dispatch_plan_immediately(plan_id: int) -> dict:
+    """단일 trade_plan을 즉시 발송 (advisor approve, 수동 트리거 등 외부 호출).
+
+    run_trade의 plan-별 안전장치 + bracket 발송과 동일 로직 1회 실행. 멱등:
+    plan.broker_order_ids가 이미 있으면 'already_sent' 반환.
+
+    안전장치 (run_trade와 동등):
+      - AUTO_TRADE_ENABLED → adapter 측 dry-run
+      - regime defensive 차단
+      - account.trading_blocked
+      - daily loss halt/close (-3% / -5%)
+      - position cap 5종목
+      - 동일 종목 보유/pending 중복
+      - 가격 검증 (entry/stop/t1/t2 정합)
+      - buying power
+    (sector cap은 broker positions에 sector 정보가 없어 immediate dispatch에선 생략;
+     cron run_trade는 trade_plans 기반으로 검증 — 정확한 sector cap은 cron 경로 우위)
+    """
+    import os
+    from collections import Counter
+    from sqlalchemy import select
+    from api.db.models import TradePlan
+    from api.db.session import async_session_factory
+    from broker_adapter import get_adapter
+    from broker_adapter.alpaca_adapter import _penny
+    from broker_adapter.base import BracketOrderRequest, qty_split_50_50
+    from scanner.regime import evaluate_regime
+
+    out: dict = {
+        "plan_id": plan_id,
+        "auto_trade_enabled": os.environ.get("AUTO_TRADE_ENABLED", "false").lower() == "true",
+    }
+
+    async with async_session_factory() as session:
+        plan = await session.get(TradePlan, plan_id)
+    if plan is None:
+        return {**out, "status": "error", "reason": f"plan {plan_id} not found"}
+
+    target = plan.plan_date
+    sym = plan.symbol.upper()
+    out["symbol"] = sym
+    out["date"] = target.isoformat()
+
+    if plan.broker_order_ids:
+        return {**out, "status": "already_sent", "broker_order_ids": plan.broker_order_ids}
+
+    regime = evaluate_regime(target)
+    out["regime_mode"] = regime.mode
+    if regime.long_blocked():
+        return {**out, "status": "blocked", "reason": f"regime defensive ({regime.mode})"}
+
+    adapter = get_adapter()
+    try:
+        acc = await adapter.get_account()
+        if acc.trading_blocked:
+            return {**out, "status": "blocked", "reason": "account trading blocked"}
+
+        halt_pct = float(os.environ.get("DAILY_LOSS_HALT_PCT", "-3.0"))
+        close_pct = float(os.environ.get("DAILY_LOSS_CLOSE_PCT", "-5.0"))
+        auto_close = os.environ.get("DAILY_LOSS_AUTO_CLOSE", "false").lower() == "true"
+        loss = await _check_daily_loss_limit(
+            adapter, acc, halt_pct=halt_pct, close_pct=close_pct, auto_close=auto_close,
+        )
+        if loss["status"] in ("close_all", "halt_new"):
+            return {**out, "status": "blocked",
+                    "reason": f"daily_loss_{loss['status']} (PnL {loss['daily_pnl_pct']:.2f}%)"}
+
+        positions = await adapter.get_positions()
+        held = {p.symbol for p in positions}
+        open_orders = await adapter.get_orders(status="open")
+        pending_count = Counter(o.symbol for o in open_orders)
+
+        if sym in held:
+            return {**out, "status": "skipped", "reason": "already_held"}
+        if pending_count.get(sym, 0) >= 2:
+            return {**out, "status": "skipped",
+                    "reason": f"pending_{pending_count[sym]}_orders"}
+
+        position_cap = int(os.environ.get("POSITION_CAP", "5"))
+        if len(positions) >= position_cap:
+            return {**out, "status": "blocked",
+                    "reason": f"position_cap ({len(positions)}/{position_cap})"}
+
+        entry = float(plan.entry_price)
+        stop = float(plan.stop_price)
+        t1 = float(plan.target_1r)
+        t2 = float(plan.target_2r)
+        qty = int(plan.shares)
+
+        if entry <= 0 or stop <= 0 or t1 <= 0 or t2 <= 0 or stop >= entry or t1 <= entry:
+            return {**out, "status": "skipped", "reason": "invalid_prices"}
+        if t2 <= t1 or _penny(t1) == _penny(t2):
+            return {**out, "status": "skipped", "reason": "invalid_targets"}
+        if qty <= 0:
+            return {**out, "status": "skipped", "reason": "qty_zero"}
+
+        need = qty * entry
+        if need > acc.buying_power:
+            return {**out, "status": "skipped",
+                    "reason": f"insufficient_buying_power need=${need:,.0f} bp=${acc.buying_power:,.0f}"}
+
+        qty_1, qty_2 = qty_split_50_50(qty)
+        is_two_tier = qty_2 > 0
+        if is_two_tier:
+            req = BracketOrderRequest(
+                symbol=sym, qty=qty, side="BUY",
+                entry_type="stop_limit",
+                entry_price=entry, stop_loss_price=stop,
+                time_in_force="gtc", is_two_tier=True,
+                target_1_price=t1, target_1_qty=qty_1,
+                target_2_price=t2, target_2_qty=qty_2,
+            )
+        else:
+            req = BracketOrderRequest(
+                symbol=sym, qty=qty, side="BUY",
+                entry_type="stop_limit",
+                entry_price=entry, stop_loss_price=stop,
+                take_profit_price=t1, time_in_force="gtc",
+            )
+
+        try:
+            orders = await adapter.place_bracket_order(req)
+        except Exception as exc:
+            logger.exception("[dispatch_immediately] place_bracket_order failed for %s", sym)
+            return {**out, "status": "error",
+                    "reason": f"order_fail: {exc.__class__.__name__}: {exc}"}
+
+        order_ids = [o.order_id for o in orders]
+        async with async_session_factory() as s:
+            p = await s.get(TradePlan, plan_id)
+            if p:
+                p.broker_order_ids = order_ids
+                p.confirm_status = "sent"
+                await s.commit()
+
+        logger.info(
+            "[dispatch_immediately] %s qty=%d entry=$%.2f stop=$%.2f t1=$%.2f t2=$%.2f orders=%s",
+            sym, qty, entry, stop, t1, t2, [oid[:12] for oid in order_ids],
+        )
+        return {**out, "status": "ok", "qty": qty, "is_two_tier": is_two_tier,
+                "order_ids": order_ids}
+    finally:
+        await adapter.close()
+
+
+async def run_intraday_loop(target: date, *, force_check: bool = False) -> dict:
     """Phase: intraday AI advisor monitor.
 
-    cron이 매 15분 호출 (09:50~15:55 ET). ADVISOR_ENABLED=true일 때만 실효.
-    트리거 평가 → run_intraday_check → confidence >= MIN_CONFIDENCE면 Telegram.
+    cron이 매 15분 호출 (09:50~15:55 ET, 트리거 기반).
+    또는 force_check=True로 매 시간 정기 검토 cron (09:30/10:30/.../15:30, 7회/일).
+    ADVISOR_ENABLED=true일 때만 실효.
 
     monitor phase와 분리: monitor는 stop breakeven 갱신, intraday-loop는 AI 자문.
     """
@@ -992,9 +1140,10 @@ async def run_intraday_loop(target: date) -> dict:
     from services.advisor.intraday_monitor import run_intraday_loop_iteration
 
     async with async_session_factory() as session:
-        result = await run_intraday_loop_iteration(session, target)
+        result = await run_intraday_loop_iteration(session, target, force_check=force_check)
     logger.info(
-        "[intraday-loop] status=%s monitor=%d triggered=%d errors=%d",
+        "[intraday-loop] force=%s status=%s monitor=%d triggered=%d errors=%d",
+        force_check,
         result.get("status"),
         len(result.get("monitor_set", [])),
         len(result.get("triggered", [])),
@@ -1253,6 +1402,11 @@ def main() -> None:
         default=30,
         help="backfill 시 거슬러 올라갈 일수 (기본 30)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="intraday-loop: 트리거/dedupe 무시하고 monitor set 전종목 LLM 호출 (정기 검토 cron 용)",
+    )
     args = parser.parse_args()
 
     target = args.date or date.today()
@@ -1293,7 +1447,10 @@ def main() -> None:
         elif args.phase == "monitor":
             result = asyncio.run(_with_advisory_lock("monitor", lambda: run_monitor(target)))
         elif args.phase == "intraday-loop":
-            result = asyncio.run(_with_advisory_lock("intraday-loop", lambda: run_intraday_loop(target)))
+            result = asyncio.run(_with_advisory_lock(
+                "intraday-loop",
+                lambda: run_intraday_loop(target, force_check=args.force),
+            ))
         else:
             result = asyncio.run(_with_advisory_lock("all", lambda: run_all(target, args.lookback)))
     except Exception as exc:
