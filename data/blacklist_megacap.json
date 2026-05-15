@@ -1,0 +1,30 @@
+{
+  "comment": "메가캡 BLACKLIST — 단타 효율 낮음 (변동성/거래대금 비율 부족, 모멘텀 둔화). 시총 > $500B 기준 + 사용자 검증 메모리 (Score 5 결과).",
+  "version": 1,
+  "criteria": {
+    "market_cap_min_usd": 500000000000,
+    "rationale": "Ross Cameron 학파의 모멘텀 단타에 부적합. 갭/RVOL 폭발이 적고 institutional ownership이 높아 short-term price action이 약함."
+  },
+  "members": [
+    { "symbol": "AAPL",  "approx_market_cap_b": 3500, "reason": "mega-cap, low intraday vol/cap ratio" },
+    { "symbol": "MSFT",  "approx_market_cap_b": 3200, "reason": "mega-cap" },
+    { "symbol": "GOOGL", "approx_market_cap_b": 2200, "reason": "mega-cap" },
+    { "symbol": "GOOG",  "approx_market_cap_b": 2200, "reason": "mega-cap (class C)" },
+    { "symbol": "AMZN",  "approx_market_cap_b": 2100, "reason": "mega-cap" },
+    { "symbol": "NVDA",  "approx_market_cap_b": 2900, "reason": "mega-cap (변동성은 있으나 사이즈 과대 — 별도 swing 풀에서만 고려)" },
+    { "symbol": "META",  "approx_market_cap_b": 1500, "reason": "mega-cap" },
+    { "symbol": "TSLA",  "approx_market_cap_b": 800,  "reason": "mega-cap (예외 검토 가능)" },
+    { "symbol": "BRK-B", "approx_market_cap_b": 1000, "reason": "mega-cap, low vol" },
+    { "symbol": "LLY",   "approx_market_cap_b": 700,  "reason": "mega-cap" },
+    { "symbol": "JPM",   "approx_market_cap_b": 700,  "reason": "mega-cap, sector rotation 외에는 단타 부적합" },
+    { "symbol": "V",     "approx_market_cap_b": 600,  "reason": "mega-cap" },
+    { "symbol": "MA",    "approx_market_cap_b": 500,  "reason": "mega-cap" },
+    { "symbol": "WMT",   "approx_market_cap_b": 600,  "reason": "mega-cap" },
+    { "symbol": "JNJ",   "approx_market_cap_b": 500,  "reason": "mega-cap, low vol" },
+    { "symbol": "XOM",   "approx_market_cap_b": 500,  "reason": "mega-cap, oil dependent" },
+    { "symbol": "UNH",   "approx_market_cap_b": 500,  "reason": "mega-cap" },
+    { "symbol": "PG",    "approx_market_cap_b": 400,  "reason": "near mega-cap, low vol" },
+    { "symbol": "ORCL",  "approx_market_cap_b": 500,  "reason": "near mega-cap" },
+    { "symbol": "HD",    "approx_market_cap_b": 400,  "reason": "near mega-cap" }
+  ]
+}

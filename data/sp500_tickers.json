@@ -1,0 +1,10 @@
+{
+  "comment": "S&P 500 / NASDAQ 100 메가캡 + 대형주 50개. 매트릭스 검증용. backtests.data_cache.fetch_sp500_tickers()로 Wikipedia에서 전체 500개 동적 갱신 가능.",
+  "tickers": [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM", "V",
+    "UNH", "XOM", "JNJ", "WMT", "MA", "PG", "HD", "CVX", "ABBV", "PFE",
+    "BAC", "KO", "COST", "AVGO", "PEP", "TMO", "MRK", "ORCL", "CRM", "ADBE",
+    "NFLX", "CSCO", "DIS", "ABT", "INTC", "AMD", "WFC", "LLY", "MCD", "CMCSA",
+    "QCOM", "TXN", "PM", "RTX", "UPS", "NEE", "NKE", "LOW", "UNP", "HON"
+  ]
+}

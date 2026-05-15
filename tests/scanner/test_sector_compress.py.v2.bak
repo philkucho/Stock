@@ -1,0 +1,83 @@
+"""섹터 중복 압축 → Top 3 + 백업 2 시나리오 3종."""
+
+from __future__ import annotations
+
+from scanner.catalysts.types import CatalystKind, CatalystScore
+from scanner.stage2_daily_picks import (
+    BACKUP_PICKS_COUNT,
+    TOP_PICKS_COUNT,
+    CandidateMetrics,
+    GateResult,
+    PickRecord,
+    ScoreBreakdown,
+    compress_by_sector,
+)
+
+
+def _make_pick(symbol: str, sector: str, total_score: float) -> PickRecord:
+    return PickRecord(
+        symbol=symbol,
+        rank=0,
+        is_backup=False,
+        metrics=CandidateMetrics(symbol=symbol, sector=sector),
+        gate=GateResult(True, True, True, True, True, True),
+        score=ScoreBreakdown(s1_gap_rvol=total_score),
+        catalyst=CatalystScore(0, CatalystKind.NONE, "", ""),
+        pivot=100.0,
+        stop=98.0,
+        target_1r=102.0,
+        target_2r=104.0,
+        risk_per_share=2.0,
+        position_size=10,
+        strategy_tag="day",
+    )
+
+
+def test_no_duplicates_top3_intact():
+    picks = [
+        _make_pick("AAA", "Technology", 20),
+        _make_pick("BBB", "Healthcare", 18),
+        _make_pick("CCC", "Financials", 16),
+        _make_pick("DDD", "Energy", 14),
+        _make_pick("EEE", "Consumer", 13),
+    ]
+    final = compress_by_sector(picks)
+    top = [p for p in final if not p.is_backup]
+    backup = [p for p in final if p.is_backup]
+    assert [p.symbol for p in top] == ["AAA", "BBB", "CCC"]
+    assert len(backup) == BACKUP_PICKS_COUNT
+    assert all(p.rank in (1, 2, 3) for p in top)
+
+
+def test_two_same_sector_demotes_lower():
+    """Top3 후보 두 개가 같은 섹터면 점수 낮은 쪽이 backup."""
+    picks = [
+        _make_pick("AAA", "Technology", 20),
+        _make_pick("BBB", "Technology", 18),  # 같은 섹터
+        _make_pick("CCC", "Healthcare", 16),
+        _make_pick("DDD", "Financials", 15),
+        _make_pick("EEE", "Energy", 13),
+    ]
+    final = compress_by_sector(picks)
+    top_symbols = [p.symbol for p in final if not p.is_backup]
+    assert "AAA" in top_symbols
+    assert "BBB" not in top_symbols  # 같은 섹터로 강등
+    assert "CCC" in top_symbols
+    assert "DDD" in top_symbols  # AAA 압축되어 한자리 더 생김
+    backup_symbols = [p.symbol for p in final if p.is_backup]
+    assert "BBB" in backup_symbols
+
+
+def test_all_same_sector_only_one_top():
+    """5종목 모두 같은 섹터 — top1 + backup 2 (top 빈자리는 다른 후보 없으므로)."""
+    picks = [
+        _make_pick(f"S{i}", "Technology", 20 - i)
+        for i in range(5)
+    ]
+    final = compress_by_sector(picks)
+    top = [p for p in final if not p.is_backup]
+    # compress_by_sector는 unique sector 1개만 통과시키므로 top=1, 나머지 backup BACKUP_PICKS_COUNT개
+    assert len(top) == 1
+    assert top[0].symbol == "S0"
+    backup = [p for p in final if p.is_backup]
+    assert len(backup) == BACKUP_PICKS_COUNT

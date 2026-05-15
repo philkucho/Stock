@@ -1,0 +1,42 @@
+{
+  "comment": "Score 5 알파 검증 결과 — 반도체장비/모멘텀 단타 후보. 메가캡 BLACKLIST 제외. valid_until은 added_at + 30일 (rolling 재검증).",
+  "version": 1,
+  "schema": {
+    "symbol": "string",
+    "category": "semis_equipment | momentum | growth_smid",
+    "added_at": "ISO date",
+    "notes": "string (선택)"
+  },
+  "members": [
+    { "symbol": "AVGO",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "AI 인프라 모멘텀, 옵션 활성" },
+    { "symbol": "AMAT",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "WFE leader, TSM capex 동조" },
+    { "symbol": "LRCX",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "etch/dep 장비, HBM 수혜" },
+    { "symbol": "KLAC",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "process control" },
+    { "symbol": "ASML",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "EUV 독점, ADR" },
+    { "symbol": "ARM",   "category": "semis_equipment", "added_at": "2026-05-07", "notes": "modern IPO, license growth" },
+    { "symbol": "MU",    "category": "semis_equipment", "added_at": "2026-05-07", "notes": "메모리 사이클" },
+    { "symbol": "MRVL",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "AI 네트워킹 ASIC" },
+    { "symbol": "ON",    "category": "semis_equipment", "added_at": "2026-05-07", "notes": "EV 반도체" },
+    { "symbol": "TER",   "category": "semis_equipment", "added_at": "2026-05-07", "notes": "테스트 장비" },
+    { "symbol": "ENTG",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "고순도 소재" },
+    { "symbol": "MPWR",  "category": "semis_equipment", "added_at": "2026-05-07", "notes": "전력반도체 모멘텀" },
+    { "symbol": "ANET",  "category": "momentum",        "added_at": "2026-05-07", "notes": "AI 네트워킹" },
+    { "symbol": "VRT",   "category": "momentum",        "added_at": "2026-05-07", "notes": "데이터센터 인프라" },
+    { "symbol": "PLTR",  "category": "momentum",        "added_at": "2026-05-07", "notes": "AIP 정부/엔터프라이즈" },
+    { "symbol": "SMCI",  "category": "momentum",        "added_at": "2026-05-07", "notes": "AI 서버, 변동성 ↑" },
+    { "symbol": "CRWD",  "category": "momentum",        "added_at": "2026-05-07", "notes": "사이버보안" },
+    { "symbol": "NET",   "category": "momentum",        "added_at": "2026-05-07", "notes": "엣지/제로트러스트" },
+    { "symbol": "DDOG",  "category": "momentum",        "added_at": "2026-05-07", "notes": "관측성" },
+    { "symbol": "NOW",   "category": "momentum",        "added_at": "2026-05-07", "notes": "엔터프라이즈 SaaS" },
+    { "symbol": "SHOP",  "category": "momentum",        "added_at": "2026-05-07", "notes": "이커머스 회복" },
+    { "symbol": "MELI",  "category": "momentum",        "added_at": "2026-05-07", "notes": "LATAM 이커머스" },
+    { "symbol": "ZS",    "category": "momentum",        "added_at": "2026-05-07", "notes": "제로트러스트" },
+    { "symbol": "PANW",  "category": "momentum",        "added_at": "2026-05-07", "notes": "사이버보안" },
+    { "symbol": "TTD",   "category": "growth_smid",     "added_at": "2026-05-07", "notes": "광고 데이터" },
+    { "symbol": "CDNS",  "category": "growth_smid",     "added_at": "2026-05-07", "notes": "EDA" },
+    { "symbol": "SNPS",  "category": "growth_smid",     "added_at": "2026-05-07", "notes": "EDA" },
+    { "symbol": "MSTR",  "category": "growth_smid",     "added_at": "2026-05-07", "notes": "BTC 프록시, 변동성 ↑" },
+    { "symbol": "CELH",  "category": "growth_smid",     "added_at": "2026-05-07", "notes": "에너지 음료 모멘텀" },
+    { "symbol": "ELF",   "category": "growth_smid",     "added_at": "2026-05-07", "notes": "코스메틱 모멘텀" }
+  ]
+}

@@ -1,0 +1,98 @@
+"""Stage 2 Gate 6개 boundary case 검증."""
+
+from __future__ import annotations
+
+from datetime import date
+
+from scanner.catalysts.types import CatalystKind, CatalystScore
+from scanner.stage2_daily_picks import (
+    GATE_GAP_PCT,
+    GATE_PREMARKET_DOLLAR_VOL,
+    GATE_QQQ_MIN_GAP_PCT,
+    GATE_RVOL,
+    GATE_SPREAD_PCT,
+    CandidateMetrics,
+    evaluate_gates,
+)
+
+
+def _empty_catalyst() -> CatalystScore:
+    return CatalystScore(score=0, primary_kind=CatalystKind.NONE, summary="", source="")
+
+
+def _filled_catalyst() -> CatalystScore:
+    return CatalystScore(score=5, primary_kind=CatalystKind.EARNINGS, summary="ER", source="x")
+
+
+def _passing_metrics() -> CandidateMetrics:
+    """모든 게이트 통과 baseline."""
+    return CandidateMetrics(
+        symbol="TEST",
+        sector="Technology",
+        market_cap=10_000_000_000,
+        float_shares=50_000_000,
+        prev_close=100.0,
+        premarket_close=103.0,
+        premarket_high=103.5,
+        premarket_dollar_vol=10_000_000,  # > 5M
+        rvol=3.0,                         # > 2x
+        gap_pct=3.0,                      # > 2%
+        bid=102.95,
+        ask=103.05,
+        spread_pct=0.1,                   # < 0.3%
+    )
+
+
+def test_all_gates_pass():
+    m = _passing_metrics()
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert gate.all_passed()
+
+
+def test_g1_market_fail():
+    m = _passing_metrics()
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": -1.5}, date(2026, 5, 8))
+    assert not gate.g1_market
+    assert not gate.all_passed()
+
+
+def test_g2_dollar_vol_boundary():
+    m = _passing_metrics()
+    m.premarket_dollar_vol = GATE_PREMARKET_DOLLAR_VOL - 1
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert not gate.g2_dollar_vol
+
+
+def test_g3_momentum_or_logic():
+    """gap 부족하지만 RVOL 충분 — 통과."""
+    m = _passing_metrics()
+    m.gap_pct = 0.5
+    m.rvol = 3.0
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert gate.g3_momentum
+
+    # 둘 다 부족
+    m.gap_pct = 0.5
+    m.rvol = 1.0
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert not gate.g3_momentum
+
+
+def test_g4_spread_lenient_when_unknown():
+    m = _passing_metrics()
+    m.spread_pct = None
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert gate.g4_spread
+
+
+def test_g5_no_catalyst_fail():
+    m = _passing_metrics()
+    gate = evaluate_gates(m, _empty_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert not gate.g5_catalyst
+
+
+def test_g6_float_too_large_fail():
+    m = _passing_metrics()
+    m.float_shares = 6_000_000_000  # 5B 컷 초과
+    gate = evaluate_gates(m, _filled_catalyst(), {"QQQ_gap_pct": 0.5}, date(2026, 5, 8))
+    assert not gate.g6_traps

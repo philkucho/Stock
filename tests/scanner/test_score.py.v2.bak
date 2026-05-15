@@ -1,0 +1,88 @@
+"""Stage 2 Score 산식 monotonicity 검증."""
+
+from __future__ import annotations
+
+from scanner.catalysts.types import CatalystKind, CatalystScore
+from scanner.stage2_daily_picks import (
+    SCORE_S1_MAX,
+    SCORE_S5_WHITELIST,
+    CandidateMetrics,
+    evaluate_scores,
+)
+
+
+def _metrics(gap: float = 3.0, rvol: float = 3.0, sector: str | None = "Technology") -> CandidateMetrics:
+    return CandidateMetrics(
+        symbol="TEST",
+        sector=sector,
+        prev_close=100.0,
+        premarket_close=100.0 * (1 + gap / 100),
+        premarket_dollar_vol=10_000_000,
+        gap_pct=gap,
+        rvol=rvol,
+    )
+
+
+def _catalyst(kind: CatalystKind = CatalystKind.NEWS) -> CatalystScore:
+    return CatalystScore(score=1, primary_kind=kind, summary="x", source="x")
+
+
+def test_s1_monotonic_in_gap():
+    """gap이 클수록 S1 ↑ (rvol 고정)."""
+    s_low, _ = evaluate_scores(_metrics(gap=2.0, rvol=2.0), _catalyst(), {}, False, None, None)
+    s_high, _ = evaluate_scores(_metrics(gap=8.0, rvol=2.0), _catalyst(), {}, False, None, None)
+    assert s_high.s1_gap_rvol > s_low.s1_gap_rvol
+
+
+def test_s1_monotonic_in_rvol():
+    s_low, _ = evaluate_scores(_metrics(gap=3.0, rvol=2.0), _catalyst(), {}, False, None, None)
+    s_high, _ = evaluate_scores(_metrics(gap=3.0, rvol=10.0), _catalyst(), {}, False, None, None)
+    assert s_high.s1_gap_rvol > s_low.s1_gap_rvol
+
+
+def test_s2_catalyst_ordering():
+    """ER > FDA/M&A > Upgrade > News > None."""
+    base = _metrics()
+    none_s, _ = evaluate_scores(base, _catalyst(CatalystKind.NONE), {}, False, None, None)
+    news_s, _ = evaluate_scores(base, _catalyst(CatalystKind.NEWS), {}, False, None, None)
+    upg_s, _ = evaluate_scores(base, _catalyst(CatalystKind.UPGRADE), {}, False, None, None)
+    fda_s, _ = evaluate_scores(base, _catalyst(CatalystKind.FDA_MA), {}, False, None, None)
+    er_s, _ = evaluate_scores(base, _catalyst(CatalystKind.EARNINGS), {}, False, None, None)
+    assert (
+        none_s.s2_catalyst
+        < news_s.s2_catalyst
+        < upg_s.s2_catalyst
+        < fda_s.s2_catalyst
+        < er_s.s2_catalyst
+    )
+
+
+def test_s4_sector_alignment():
+    """섹터 ETF 갭이 동방향이면 +2, 반대 방향이면 +1."""
+    same_dir, _ = evaluate_scores(
+        _metrics(gap=3.0, sector="Technology"),
+        _catalyst(),
+        {"XLK_gap_pct": 1.5},
+        False,
+        None,
+        None,
+    )
+    opp_dir, _ = evaluate_scores(
+        _metrics(gap=3.0, sector="Technology"),
+        _catalyst(),
+        {"XLK_gap_pct": -1.5},
+        False,
+        None,
+        None,
+    )
+    assert same_dir.s4_sector == 2.0
+    assert opp_dir.s4_sector == 1.0
+
+
+def test_s5_whitelist_bonus():
+    base = _metrics()
+    no_white, _ = evaluate_scores(base, _catalyst(), {}, False, None, None)
+    white, _ = evaluate_scores(base, _catalyst(), {}, True, None, None)
+    assert white.s5_whitelist == SCORE_S5_WHITELIST
+    assert no_white.s5_whitelist == 0.0
+    assert white.total > no_white.total
