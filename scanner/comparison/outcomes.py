@@ -267,10 +267,13 @@ async def backfill_trade_plan_outcomes(
                 # 시간순 hit 검증 (day-by-day) — 2-tier 부분 청산 시뮬에 필수
                 hit_t1 = hit_t2 = hit_stop = False
                 t1_day = t2_day = stop_day = None
+                # entry_date는 date, sym_bars.index는 Timestamp — date끼리 비교
                 window_idx = sorted(sym_bars.index)
                 try:
-                    start_i = window_idx.index(entry_date)
-                except ValueError:
+                    start_i = next(
+                        i for i, ts in enumerate(window_idx) if ts.date() == entry_date
+                    )
+                except StopIteration:
                     summary["errors"] += 1
                     continue
                 hold_idx = window_idx[start_i:start_i + horizon + 1]

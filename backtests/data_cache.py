@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -54,10 +54,11 @@ def get_bars(
     if not refresh and cache_path.exists():
         df = pd.read_parquet(cache_path)
     else:
+        # yfinance `end`는 exclusive — 오늘 bar까지 포함시키려면 +1일
         raw = yf.download(
             symbol,
             start=DEFAULT_START,
-            end=date.today().isoformat(),
+            end=(date.today() + timedelta(days=1)).isoformat(),
             interval=interval,
             progress=False,
             auto_adjust=False,

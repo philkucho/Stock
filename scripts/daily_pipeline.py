@@ -960,11 +960,14 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
                 total_budget += need
                 sector_count[sector_key] += 1  # 발송 성공 후 sector counter 증가
                 order_ids = [o.order_id for o in orders]
-                # plan에 broker_order_ids 저장 (멱등)
+                # plan에 broker_order_ids + status='sent' 저장 (멱등)
+                # 2026-05-15 fix: 이전엔 status 갱신 누락 → 'watchlist' stuck
+                # → broker drift + outcome backfill 누락. orb_auto 경로(intraday_confirm)와 동일하게 둘 다 set.
                 async with async_session_factory() as s2:
                     p2 = await s2.get(TradePlan, plan.id)
                     if p2:
                         p2.broker_order_ids = order_ids
+                        p2.confirm_status = "sent"
                         await s2.commit()
                 out["orders"].append({
                     "symbol": sym,
