@@ -76,6 +76,15 @@ const TABS: Tab[] = [
       "border-2 border-amber-500 bg-amber-200 text-amber-900 font-bold dark:border-amber-400 dark:bg-amber-700 dark:text-white",
   },
   {
+    href: "/sources",
+    label: "🚦 진입 경로",
+    title: "3가지 진입 경로(사용자/ORB자동/AI자문)별 실거래 성과 + 거래내역",
+    inactive:
+      "border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950",
+    active:
+      "border-2 border-indigo-500 bg-indigo-200 text-indigo-900 font-bold dark:border-indigo-400 dark:bg-indigo-700 dark:text-white",
+  },
+  {
     href: "/review",
     label: "📒 일일 리뷰",
     title: "오늘 계획 vs 실제 결과 — EOD 리뷰",

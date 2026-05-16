@@ -1135,3 +1135,72 @@ export async function fetchActivity(
   if (!res.ok) throw new Error(`Activity fetch failed: ${res.status}`);
   return res.json();
 }
+
+// ── Sources (dispatch path 별 실거래 성과 비교) ───────────────────────────
+
+export type SourcePath = "user_fixed" | "orb_auto" | "advisor";
+
+export type PathSummary = {
+  n_plans: number;
+  n_sent: number;
+  n_with_outcome: number;
+  win_rate: number;
+  avg_return_pct: number;
+  avg_alpha_pct: number;
+  total_pnl_usd: number;
+  hit_t1_rate: number;
+  hit_t2_rate: number;
+  hit_stop_rate: number;
+};
+
+export type SourceTradeRow = {
+  plan_id: number;
+  plan_date: string;
+  symbol: string;
+  path: SourcePath;
+  confirm_status: string;
+  qty: number;
+  entry_price: string;
+  stop_price: string;
+  target_1r: string;
+  target_2r: string;
+  sector: string | null;
+  horizon_days: number | null;
+  exit_date: string | null;
+  exit_price: string | null;
+  pct_return: number | null;
+  alpha_pct: number | null;
+  realized_pnl_usd: number | null;
+  partial_pnl_usd: number | null;
+  hit_target_1r: boolean | null;
+  hit_target_2r: boolean | null;
+  hit_stop: boolean | null;
+  has_broker_orders: boolean;
+};
+
+export type CumulativePoint = {
+  date: string;
+  user_fixed: number;
+  orb_auto: number;
+  advisor: number;
+};
+
+export type SourcesSummaryResponse = {
+  range_start: string;
+  range_end: string;
+  summary: Record<SourcePath, PathSummary>;
+  cumulative_pnl: CumulativePoint[];
+  trades: SourceTradeRow[];
+};
+
+export async function fetchSourcesSummary(
+  days: number = 30,
+  horizon: number = 1,
+): Promise<SourcesSummaryResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/sources/summary?days=${days}&horizon=${horizon}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) throw new Error(`Sources fetch failed: ${res.status}`);
+  return res.json();
+}
