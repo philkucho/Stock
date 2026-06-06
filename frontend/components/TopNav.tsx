@@ -85,6 +85,15 @@ const TABS: Tab[] = [
       "border-2 border-indigo-500 bg-indigo-200 text-indigo-900 font-bold dark:border-indigo-400 dark:bg-indigo-700 dark:text-white",
   },
   {
+    href: "/longterm",
+    label: "📅 중장기",
+    title: "3~12개월 보유 종목 추천 (Fidelity 수동 발주용) — Stage 2 + RS + 12mo 모멘텀",
+    inactive:
+      "border-lime-300 bg-lime-50 text-lime-700 hover:bg-lime-100 dark:border-lime-900 dark:bg-lime-950/40 dark:text-lime-300 dark:hover:bg-lime-950",
+    active:
+      "border-2 border-lime-500 bg-lime-200 text-lime-900 font-bold dark:border-lime-400 dark:bg-lime-700 dark:text-white",
+  },
+  {
     href: "/review",
     label: "📒 일일 리뷰",
     title: "오늘 계획 vs 실제 결과 — EOD 리뷰",

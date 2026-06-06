@@ -1213,3 +1213,55 @@ export async function fetchSourcesSummary(
   if (!res.ok) throw new Error(`Sources fetch failed: ${res.status}`);
   return res.json();
 }
+
+// ── Longterm (3~12개월 Fidelity 추천) ─────────────────────────────────────
+
+export type LongtermPick = {
+  id: number;
+  pick_month: string;
+  rank: number;
+  symbol: string;
+  sector: string | null;
+  composite_score: string;
+  gate_results: Record<string, boolean>;
+  score_breakdown: Record<string, number | string>;
+  weight_pct: string;
+  status: "new" | "hold" | "exit_suggested" | "exited";
+  fidelity_action: "BUY" | "HOLD" | "TRIM" | "SELL";
+  prev_pick_id: number | null;
+  created_at: string;
+};
+
+export type LongtermCurrent = {
+  pick_month: string | null;
+  regime: "ok" | "defensive" | "unknown";
+  new_count: number;
+  hold_count: number;
+  exit_suggested_count: number;
+  exited_count: number;
+  last_refreshed_at: string | null;
+  picks: LongtermPick[];
+};
+
+export async function fetchLongtermCurrent(): Promise<LongtermCurrent> {
+  const res = await fetch(`${API_BASE}/api/longterm/current`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Longterm fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function refreshLongterm(dryRun: boolean = false): Promise<{
+  target_date: string;
+  dry_run: boolean;
+  status: string;
+  defensive: boolean | null;
+  candidates_passed: number;
+  pick_count: number;
+  db_inserted: number;
+}> {
+  const res = await fetch(
+    `${API_BASE}/api/longterm/refresh?dry_run=${dryRun}`,
+    { method: "POST", cache: "no-store" },
+  );
+  if (!res.ok) throw new Error(`Longterm refresh failed: ${res.status}`);
+  return res.json();
+}

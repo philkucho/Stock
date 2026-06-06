@@ -522,3 +522,77 @@ class StrategyAssignment(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class LongtermPick(Base):
+    """중장기(3~12개월) Fidelity 추천 픽 — alembic 0014, 2026-06-05 도입.
+
+    Monthly rebalance. swing/intraday와 분리 (feedback decay horizon=5 hardcoded 회귀 방지).
+    자동매매 X — Fidelity 수동 발주용 추천. weight_pct는 자본 분배 가이드 (기본 10%).
+
+    status flow: new -> hold -> exit_suggested -> exited
+    fidelity_action: BUY | HOLD | TRIM | SELL
+    """
+
+    __tablename__ = "longterm_picks"
+    __table_args__ = (
+        UniqueConstraint("pick_month", "symbol", name="uq_longterm_pick_month_sym"),
+        Index("ix_longterm_picks_month", "pick_month"),
+        Index("ix_longterm_picks_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    pick_month: Mapped[date] = mapped_column(Date, nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    sector: Mapped[str | None] = mapped_column(String(48))
+    composite_score: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+    gate_results: Mapped[dict] = mapped_column(JSONB, default=dict)
+    score_breakdown: Mapped[dict] = mapped_column(JSONB, default=dict)
+    weight_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("10.00")
+    )
+    status: Mapped[str] = mapped_column(String(16), default="new")
+    fidelity_action: Mapped[str] = mapped_column(String(8), default="BUY")
+    prev_pick_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("longterm_picks.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    outcomes: Mapped[list[LongtermOutcome]] = relationship(
+        back_populates="pick", cascade="all, delete-orphan"
+    )
+
+
+class LongtermOutcome(Base):
+    """LongtermPick의 horizon별 실현 수익 — alembic 0014.
+
+    horizon = 21 / 63 / 126 / 252 거래일. backfill cron이 일별 적재.
+    252d outcome은 진입 후 1년 뒤 산출 (초기 dashboard는 21/63d만 노출).
+    """
+
+    __tablename__ = "longterm_outcomes"
+    __table_args__ = (
+        UniqueConstraint("pick_id", "days_held", name="uq_longterm_outcome_pick_horizon"),
+        Index("ix_longterm_outcomes_eval", "eval_date", "days_held"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    pick_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("longterm_picks.id", ondelete="CASCADE"), nullable=False
+    )
+    eval_date: Mapped[date] = mapped_column(Date, nullable=False)
+    days_held: Mapped[int] = mapped_column(Integer, nullable=False)
+    pct_return: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    spy_pct_return: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    alpha: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    mfe_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    mae_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    status_at_eval: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    pick: Mapped[LongtermPick] = relationship(back_populates="outcomes")

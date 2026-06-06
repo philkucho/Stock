@@ -28,6 +28,7 @@ from api.routes import (
     backtests,
     comparison,
     dashboard,
+    longterm,
     market_diagnosis,
     matrix,
     picks,
@@ -125,6 +126,7 @@ app.include_router(scanner.router, prefix="/api/scanner", tags=["scanner"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 app.include_router(comparison.router, prefix="/api/comparison", tags=["comparison"])
 app.include_router(sources.router, prefix="/api/sources", tags=["sources"])
+app.include_router(longterm.router, prefix="/api/longterm", tags=["longterm"])
 app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
 app.include_router(review.router, prefix="/api/review", tags=["review"])
 app.include_router(advisor.router, prefix="/api/advisor", tags=["advisor"])
