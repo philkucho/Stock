@@ -211,9 +211,41 @@ async def get_outcomes(
     }
 
 
+def _weekly_volume_series(symbol: str, weeks: int = 52) -> list[dict]:
+    """일봉(get_bars 캐시) → 주별 거래량/거래대금 시리즈. 최신순."""
+    from datetime import date as _date, timedelta as _td
+
+    from backtests.data_cache import get_bars
+
+    end = _date.today()
+    start = end - _td(days=weeks * 7 + 14)
+    try:
+        bars = get_bars(symbol, start.isoformat(), end.isoformat())
+        if bars is None or bars.empty:
+            return []
+        weekly = bars.resample("W").agg({
+            "volume": "sum",
+            "close": "last",
+            "high": "max",
+            "low": "min",
+        }).dropna()
+        weekly["dollar_volume"] = weekly["volume"] * weekly["close"]
+        out = []
+        for ts, row in weekly.tail(weeks).iterrows():
+            out.append({
+                "date": ts.date().isoformat(),
+                "volume": int(row["volume"]),
+                "dollar_volume_musd": round(float(row["dollar_volume"]) / 1_000_000, 1),
+                "close": round(float(row["close"]), 2),
+            })
+        return list(reversed(out))  # 최신순
+    except Exception:
+        return []
+
+
 @router.get("/detail/{symbol}")
 async def get_detail(symbol: str) -> dict:
-    """종목 상세 — 분기 매출/마진/현금흐름/부채 + 밸류에이션 + 투자 체크리스트.
+    """종목 상세 — 분기 매출/마진/현금흐름/부채 + 밸류에이션 + 주별 거래량 + 체크리스트.
 
     캐시 우선 (30일 TTL). Miss 시 yfinance fetch (1종목당 1-3초).
     """
@@ -224,6 +256,9 @@ async def get_detail(symbol: str) -> dict:
     r = await asyncio.to_thread(fetch_one_detail, symbol.upper())
     if r is None:
         raise HTTPException(404, f"Fundamentals not available for {symbol}")
+
+    # 주별 거래량 (get_bars 캐시 활용, 빠름)
+    weekly_volume = await asyncio.to_thread(_weekly_volume_series, symbol.upper(), 52)
 
     # ── 파생 계산 ──
     def _latest(series):
@@ -397,6 +432,7 @@ async def get_detail(symbol: str) -> dict:
             "quarterly_fcf": r.get("quarterly_fcf") or [],
             "quarterly_total_debt": r.get("quarterly_total_debt") or [],
             "quarterly_equity": r.get("quarterly_equity") or [],
+            "weekly_volume": weekly_volume,
         },
         "checklist": checklist,
         "fetched_at": r.get("fetched_at"),

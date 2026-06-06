@@ -1323,6 +1323,12 @@ export type LongtermDetail = {
     quarterly_fcf: SeriesPoint[];
     quarterly_total_debt: SeriesPoint[];
     quarterly_equity: SeriesPoint[];
+    weekly_volume?: {
+      date: string;
+      volume: number;
+      dollar_volume_musd: number;
+      close: number;
+    }[];
   };
   checklist: ChecklistItem[];
   fetched_at: string;

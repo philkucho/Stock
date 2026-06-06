@@ -7,6 +7,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Legend,
   Line,
   LineChart,
@@ -307,6 +308,74 @@ export default function LongtermDetailPage() {
                     <Bar dataKey="영업현금흐름" fill="#059669" />
                     <Bar dataKey="자유현금흐름" fill="#16a34a" />
                   </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+          )}
+
+          {/* 주별 거래대금 + 종가 (52주) */}
+          {(data.series.weekly_volume?.length ?? 0) > 0 && (
+            <section className="space-y-2">
+              <h2 className="text-lg font-semibold">
+                📊 주별 거래대금 + 종가 (52주)
+              </h2>
+              <p className="text-xs text-zinc-500">
+                거래대금 폭증 = 시장 관심도 ↑ · 가격 상승 + 거래대금 동반 상승은
+                건강한 추세, 가격만 상승하고 거래대금 정체는 약세 신호.
+              </p>
+              <div className="h-72 w-full rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart
+                    data={[...(data.series.weekly_volume ?? [])]
+                      .reverse()
+                      .map((w) => ({
+                        date: w.date.slice(5),  // MM-DD
+                        "거래대금($M)": w.dollar_volume_musd,
+                        "종가($)": w.close,
+                      }))}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="date" interval={3} />
+                    <YAxis
+                      yAxisId="left"
+                      tickFormatter={(v) =>
+                        v >= 1000 ? `${(v / 1000).toFixed(1)}B` : `${v.toFixed(0)}M`
+                      }
+                      label={{ value: "거래대금", angle: -90, position: "insideLeft", style: { fontSize: 11 } }}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      tickFormatter={(v) => `$${v.toFixed(0)}`}
+                      label={{ value: "종가", angle: 90, position: "insideRight", style: { fontSize: 11 } }}
+                    />
+                    <Tooltip
+                      formatter={(v, name) => {
+                        if (name === "거래대금($M)") {
+                          const n = Number(v);
+                          return n >= 1000
+                            ? `${(n / 1000).toFixed(2)}B`
+                            : `${n.toFixed(0)}M`;
+                        }
+                        return `$${Number(v).toFixed(2)}`;
+                      }}
+                    />
+                    <Legend />
+                    <Bar
+                      yAxisId="left"
+                      dataKey="거래대금($M)"
+                      fill="#8b5cf6"
+                      opacity={0.7}
+                    />
+                    <Line
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey="종가($)"
+                      stroke="#dc2626"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
             </section>
