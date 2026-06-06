@@ -220,15 +220,24 @@ def send_failure_alert(
     send_heartbeat(phase=phase, status="failed", message=message, details=full_details)
 
 
-async def reconcile_broker_state(adapter, target_date) -> dict:
+async def reconcile_broker_state(
+    adapter, target_date, *, lookback_days: int = 30
+) -> dict:
     """Alpaca positions/orders vs DB trade_plans 비교.
 
     불일치 종류:
-      - unexpected_holding: DB plan 미발송인데 broker에 포지션 있음 (외부 발송, 잔여 등)
-      - mismatch_qty: holding qty != plan.shares (부분 fill 후 잔여 cancel 등)
+      - unexpected_holding: 최근 lookback_days 내 sent plan과도 매칭 안 되는 broker 포지션
+        (외부 발송, 한참 전 잔여 등 진짜 의심스러운 케이스만)
+      - mismatch_qty: holding qty != owning plan의 expected (부분 fill 후 잔여 cancel 등)
       - missing_order: plan.broker_order_ids 등록됐는데 open_orders에도 없고 holding으로도
         안 잡혀 있음. 정상 lifecycle(filled→exit→없음)일 수도 있어 alert 발생 X (조용히 표시).
+
+    Multi-day swing 보유 처리: target_date plan에만 의존하면 어제·그저께 plan에서 진입한
+    보유가 'unexpected_holding'으로 오인됨. lookback_days(기본 30일) 윈도우 내의 가장 최근
+    'sent' plan을 owning plan으로 매칭한다.
     """
+    from datetime import timedelta
+
     from sqlalchemy import select
 
     from api.db.models import TradePlan
@@ -240,13 +249,29 @@ async def reconcile_broker_state(adapter, target_date) -> dict:
     held = {p.symbol.upper(): p for p in positions}
 
     async with async_session_factory() as session:
-        stmt = select(TradePlan).where(TradePlan.plan_date == target_date)
-        plans = list((await session.execute(stmt)).scalars().all())
+        today_stmt = select(TradePlan).where(TradePlan.plan_date == target_date)
+        today_plans = list((await session.execute(today_stmt)).scalars().all())
 
-    plans_by_sym = {p.symbol.upper(): p for p in plans}
+        lookback_start = target_date - timedelta(days=lookback_days)
+        owning_stmt = (
+            select(TradePlan)
+            .where(TradePlan.plan_date >= lookback_start)
+            .where(TradePlan.plan_date <= target_date)
+            .where(TradePlan.confirm_status == "sent")
+            .order_by(TradePlan.plan_date.desc())
+        )
+        owning_candidates = list((await session.execute(owning_stmt)).scalars().all())
+
+    # symbol → most recent sent plan within lookback (multi-day swing 보유의 출처)
+    plans_by_sym: dict[str, TradePlan] = {}
+    for p in owning_candidates:
+        sym = p.symbol.upper()
+        if sym not in plans_by_sym:
+            plans_by_sym[sym] = p
+
     discrepancies: list[dict] = []
 
-    # 1) broker에 있는데 DB plan 없음 — 외부 발송 또는 전일 잔여
+    # 1) broker에 있는데 최근 30일 sent plan에도 없음 — 외부 발송 또는 오래된 잔여
     for sym, pos in held.items():
         if sym not in plans_by_sym:
             discrepancies.append({
@@ -254,6 +279,7 @@ async def reconcile_broker_state(adapter, target_date) -> dict:
                 "symbol": sym,
                 "qty": pos.qty,
                 "avg_entry": pos.avg_entry_price,
+                "lookback_days": lookback_days,
             })
 
     # 2) plan과 holding qty 불일치 정확 계산 (1.1 강화).
@@ -310,8 +336,10 @@ async def reconcile_broker_state(adapter, target_date) -> dict:
 
     return {
         "target_date": target_date.isoformat(),
+        "lookback_days": lookback_days,
         "broker_positions": len(positions),
         "broker_open_orders": len(open_orders),
-        "db_plans": len(plans),
+        "db_plans": len(today_plans),
+        "owning_plans_in_window": len(plans_by_sym),
         "discrepancies": discrepancies,
     }
