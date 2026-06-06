@@ -27,21 +27,44 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 logger = logging.getLogger(__name__)
 
-# 설계 상수 (backtest와 동기화)
+# 설계 상수 (v2 펀더멘털 도입 — 2026-06-05)
 ADV_MIN_DOLLARS = 20_000_000.0
 NEAR_52W_HIGH_PCT = 0.10
-RS_PCT_WEIGHT = 40.0
-MOM_12MO_WEIGHT = 25.0
-SMA200_DIST_WEIGHT = 15.0
-STAGE2_MARGIN_WEIGHT = 10.0
 SMA200_FAR_PCT = 0.50
 TURNOVER_CAP_KEEP = 6
 TOP_N_DEFAULT = 10
 REGIME_SPY_SMA = 200
 
+# v2 점수 가중치 (100점 만점)
+RS_PCT_WEIGHT = 25.0            # v1 40 → 25 (의존도 축소)
+MOM_12MO_WEIGHT = 15.0          # v1 25 → 15
+SMA200_DIST_WEIGHT = 10.0       # v1 15 → 10
+STAGE2_MARGIN_WEIGHT = 5.0      # v1 10 → 5
+REV_YOY_WEIGHT = 15.0           # NEW: 매출 YoY percentile
+EPS_YOY_WEIGHT = 10.0           # NEW: EPS YoY percentile
+PEG_WEIGHT = 10.0               # NEW: PEG 낮을수록 +
+QOQ_ACCEL_WEIGHT = 5.0          # NEW: 분기 성장 가속화
+FCF_MARGIN_WEIGHT = 5.0         # NEW: FCF / Revenue
 
-def _evaluate_symbol(symbol: str, bars: pd.DataFrame, eval_ts: pd.Timestamp) -> dict | None:
-    """eval_ts 시점까지의 데이터로 게이트 평가 + score component 산출."""
+# v2 펀더 게이트 (누락 시 fail-soft = 통과)
+REVENUE_YOY_MIN = 0.05          # +5% YoY 매출 성장 미만 컷
+FORWARD_PE_MAX = 40.0           # forward P/E > 40 컷 (성장주 한계)
+EPS_YOY_MIN = -0.20             # EPS YoY < -20% (대폭 감익) 컷
+
+# v1 호환 — 백테스트 v1은 import 시 ImportError 방지
+SECTOR_PENALTY = 0.0
+
+
+def _evaluate_symbol(
+    symbol: str,
+    bars: pd.DataFrame,
+    eval_ts: pd.Timestamp,
+    fundamentals: dict | None = None,
+) -> dict | None:
+    """eval_ts 시점까지의 데이터 + 펀더멘털로 게이트 + score component 산출.
+
+    fundamentals: scanner.longterm.fundamentals 의 dict (없으면 펀더 게이트 fail-soft).
+    """
     hist = bars[bars.index < eval_ts]
     if len(hist) < 252:
         return None
@@ -55,12 +78,31 @@ def _evaluate_symbol(symbol: str, bars: pd.DataFrame, eval_ts: pd.Timestamp) -> 
     last_30 = hist.tail(30)
     adv_30d = float((last_30["close"] * last_30["volume"]).mean())
 
+    # 기술적 게이트
     gate_results = {
         "stage2": stage2,
         "above_ma200": last_close > sma200,
         "near_52w_high": last_close >= high_52w * (1.0 - NEAR_52W_HIGH_PCT),
         "adv_ok": adv_30d >= ADV_MIN_DOLLARS,
     }
+
+    # v2 펀더 게이트 (누락 시 fail-soft = True 처리, 단 데이터 있으면 엄격하게 컷)
+    fund = fundamentals or {}
+    rev_yoy = fund.get("revenue_yoy")
+    eps_yoy = fund.get("eps_yoy")
+    fwd_pe = fund.get("forward_pe")
+    trailing_pe = fund.get("trailing_pe")
+
+    gate_results["revenue_growth"] = (
+        rev_yoy is None or rev_yoy >= REVENUE_YOY_MIN
+    )
+    gate_results["valuation_ok"] = (
+        fwd_pe is None or (0 < fwd_pe <= FORWARD_PE_MAX)
+    ) and (trailing_pe is None or trailing_pe > 0)  # trailing PE 음수 = 적자
+    gate_results["earnings_ok"] = (
+        eps_yoy is None or eps_yoy >= EPS_YOY_MIN
+    )
+
     if not all(gate_results.values()):
         return {"symbol": symbol, "gates_passed": False, "gate_results": gate_results}
 
@@ -78,11 +120,12 @@ def _evaluate_symbol(symbol: str, bars: pd.DataFrame, eval_ts: pd.Timestamp) -> 
     c6_margin = (sma200 / sma200_prev) - 1.0 if sma200_prev > 0 else 0.0
     low_52w = float(hist["low"].rolling(252).min().iloc[-1])
     c7_margin = (last_close / (low_52w * 1.30)) - 1.0 if low_52w > 0 else 0.0
-    c8_margin = (high_52w * 0.75) / last_close if last_close > 0 else 0.0
+    # c8: -25% 기준선 대비 여유 (0 = 정확히 -25%, 1/3 = 신고가). ×3으로 0~1 정규화.
+    c8_margin = (last_close / (high_52w * 0.75)) - 1.0 if high_52w > 0 else 0.0
     c_margin = (
         max(0.0, min(1.0, c6_margin / 0.05))
         + max(0.0, min(1.0, c7_margin / 0.50))
-        + max(0.0, min(1.0, c8_margin - 1.0))
+        + max(0.0, min(1.0, c8_margin * 3.0))
     ) / 3.0
 
     return {
@@ -97,22 +140,65 @@ def _evaluate_symbol(symbol: str, bars: pd.DataFrame, eval_ts: pd.Timestamp) -> 
         "adv_30d": adv_30d,
         "high_52w": high_52w,
         "stage2_diag": diag,
+        # v2 펀더 raw 필드 (점수 계산에서 사용)
+        "fund_rev_yoy": rev_yoy,
+        "fund_eps_yoy": eps_yoy,
+        "fund_peg": fund.get("peg_ratio"),
+        "fund_fwd_pe": fwd_pe,
+        "fund_fcf_margin": fund.get("fcf_margin"),
+        "fund_eps_qoq": fund.get("eps_qoq"),
+        "fund_rev_qoq": fund.get("revenue_qoq"),
+        "fund_profit_margin": fund.get("profit_margin"),
     }
 
 
+def _pct_rank(value: float | None, sorted_pool: list[float]) -> int | None:
+    """sorted_pool 내 value의 percentile rank (1~99). None → None."""
+    if value is None or not sorted_pool:
+        return None
+    below = sum(1 for r in sorted_pool if r < value)
+    return max(1, min(99, round((below / len(sorted_pool)) * 99) + 1))
+
+
+def _peg_score(peg: float | None) -> float:
+    """PEG ratio → 0~1 점수. 낮을수록 좋음. None → 0.5 (중립)."""
+    if peg is None or peg <= 0:
+        return 0.5
+    if peg < 1.0:
+        return 1.0
+    if peg < 1.5:
+        return 0.75
+    if peg < 2.0:
+        return 0.4
+    if peg < 3.0:
+        return 0.15
+    return 0.0
+
+
 def _score_candidates(candidates: list[dict]) -> list[dict]:
-    """게이트 통과 종목 → composite score 추가, 정렬."""
+    """게이트 통과 종목 → composite score 추가, 정렬 (v2: 펀더 포함 100점)."""
     passed = [c for c in candidates if c.get("gates_passed")]
     if not passed:
         return []
 
+    n = len(passed)
     raws = sorted(c["rs_raw"] for c in passed)
-    n = len(raws)
+    moms = sorted(c["mom_12mo"] for c in passed)
+    # 펀더 cross-sectional pools (None 제외)
+    rev_pool = sorted(c["fund_rev_yoy"] for c in passed if c.get("fund_rev_yoy") is not None)
+    eps_pool = sorted(c["fund_eps_yoy"] for c in passed if c.get("fund_eps_yoy") is not None)
+    fcf_pool = sorted(
+        c["fund_fcf_margin"] for c in passed if c.get("fund_fcf_margin") is not None
+    )
+
     for c in passed:
+        # 기술적 점수
         below = sum(1 for r in raws if r < c["rs_raw"])
         c["rs_pct"] = max(1, min(99, round((below / n) * 99) + 1))
 
-        mom_norm = max(0.0, min(1.0, c["mom_12mo"] / 1.0))
+        below_m = sum(1 for m in moms if m < c["mom_12mo"])
+        c["mom_pct"] = max(1, min(99, round((below_m / n) * 99) + 1))
+        mom_norm = c["mom_pct"] / 99.0
 
         d = c["sma200_dist"]
         if d <= SMA200_FAR_PCT:
@@ -121,23 +207,68 @@ def _score_candidates(candidates: list[dict]) -> list[dict]:
             over = (d - SMA200_FAR_PCT) / SMA200_FAR_PCT
             sma_norm = max(0.0, 1.0 - over)
 
+        # 펀더 점수 — None은 중립 (0.5)
+        rev_pct = _pct_rank(c.get("fund_rev_yoy"), rev_pool)
+        c["rev_pct"] = rev_pct
+        rev_norm = (rev_pct / 99.0) if rev_pct is not None else 0.5
+
+        eps_pct = _pct_rank(c.get("fund_eps_yoy"), eps_pool)
+        c["eps_pct"] = eps_pct
+        eps_norm = (eps_pct / 99.0) if eps_pct is not None else 0.5
+
+        fcf_pct = _pct_rank(c.get("fund_fcf_margin"), fcf_pool)
+        c["fcf_pct"] = fcf_pct
+        fcf_norm = (fcf_pct / 99.0) if fcf_pct is not None else 0.5
+
+        peg_norm = _peg_score(c.get("fund_peg"))
+
+        # QoQ 가속화: eps_qoq > eps_yoy (분기 가속화)
+        eps_qoq = c.get("fund_eps_qoq")
+        eps_yoy = c.get("fund_eps_yoy")
+        qoq_norm = 1.0 if (eps_qoq is not None and eps_yoy is not None and eps_qoq > eps_yoy) else 0.0
+        if eps_qoq is None or eps_yoy is None:
+            qoq_norm = 0.5  # 중립
+
         composite = (
             (c["rs_pct"] / 99.0) * RS_PCT_WEIGHT
             + mom_norm * MOM_12MO_WEIGHT
             + sma_norm * SMA200_DIST_WEIGHT
             + c["c_margin"] * STAGE2_MARGIN_WEIGHT
+            + rev_norm * REV_YOY_WEIGHT
+            + eps_norm * EPS_YOY_WEIGHT
+            + peg_norm * PEG_WEIGHT
+            + qoq_norm * QOQ_ACCEL_WEIGHT
+            + fcf_norm * FCF_MARGIN_WEIGHT
         )
         c["composite_score"] = round(composite, 2)
         c["score_breakdown"] = {
+            # 기술적
             "rs_pct": c["rs_pct"],
+            "mom_pct": c["mom_pct"],
             "mom_12mo": round(c["mom_12mo"], 4),
             "sma200_dist": round(c["sma200_dist"], 4),
             "c_margin": round(c["c_margin"], 3),
             "adv_30d_musd": round(c["adv_30d"] / 1_000_000, 1),
-            "rs_weight": RS_PCT_WEIGHT,
-            "mom_weight": MOM_12MO_WEIGHT,
-            "sma_weight": SMA200_DIST_WEIGHT,
-            "stage2_weight": STAGE2_MARGIN_WEIGHT,
+            # 펀더
+            "rev_yoy": c.get("fund_rev_yoy"),
+            "rev_pct": rev_pct,
+            "eps_yoy": c.get("fund_eps_yoy"),
+            "eps_pct": eps_pct,
+            "forward_pe": c.get("fund_fwd_pe"),
+            "peg_ratio": c.get("fund_peg"),
+            "peg_norm": round(peg_norm, 2),
+            "fcf_margin": c.get("fund_fcf_margin"),
+            "fcf_pct": fcf_pct,
+            "qoq_accel": qoq_norm > 0.5,
+            "profit_margin": c.get("fund_profit_margin"),
+            # 가중치 (UI 디버깅용)
+            "version": "v2",
+            "weights": {
+                "rs": RS_PCT_WEIGHT, "mom": MOM_12MO_WEIGHT,
+                "sma": SMA200_DIST_WEIGHT, "stage2": STAGE2_MARGIN_WEIGHT,
+                "rev": REV_YOY_WEIGHT, "eps": EPS_YOY_WEIGHT,
+                "peg": PEG_WEIGHT, "qoq": QOQ_ACCEL_WEIGHT, "fcf": FCF_MARGIN_WEIGHT,
+            },
         }
 
     return sorted(passed, key=lambda x: x["composite_score"], reverse=True)
@@ -226,6 +357,11 @@ async def run_longterm_selection(
         out["status"] = "defensive"
         return out
 
+    # v2: 펀더 캐시 일괄 로드 (디스크에서)
+    from scanner.longterm.fundamentals import load_cached_universe
+    fund_map = load_cached_universe()
+    logger.info("[longterm] fundamentals cached: %d symbols", len(fund_map))
+
     candidates: list[dict] = []
     fetch_start = "2017-01-01"  # 252봉 + warmup
     fetch_end = target_date.isoformat()
@@ -235,7 +371,8 @@ async def run_longterm_selection(
             if bars is None or bars.empty or len(bars) < 252:
                 out["skipped"].append({"symbol": sym, "reason": "insufficient_bars"})
                 continue
-            ev = _evaluate_symbol(sym, bars, target_ts)
+            fund = fund_map.get(sym.upper())
+            ev = _evaluate_symbol(sym, bars, target_ts, fundamentals=fund)
             if ev is not None:
                 candidates.append(ev)
         except Exception as exc:

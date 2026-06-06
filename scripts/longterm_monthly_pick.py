@@ -103,12 +103,19 @@ async def main(target_date: date, dry_run: bool = False) -> dict:
         result["dry_run"] = True
         return result
 
-    # DB upsert
-    from sqlalchemy import select
+    # DB upsert (월 단위 clean replace — 같은 pick_month 기존 row 삭제 후 insert)
+    from sqlalchemy import delete, select
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from api.db.models import LongtermPick
     from api.db.session import async_session_factory
+
+    async with async_session_factory() as s:
+        await s.execute(
+            delete(LongtermPick).where(LongtermPick.pick_month == target_date)
+        )
+        await s.commit()
+        logger.info("[longterm] cleared existing rows for pick_month=%s", target_date)
 
     inserted = 0
     async with async_session_factory() as s:

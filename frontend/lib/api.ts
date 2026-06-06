@@ -1230,6 +1230,8 @@ export type LongtermPick = {
   fidelity_action: "BUY" | "HOLD" | "TRIM" | "SELL";
   prev_pick_id: number | null;
   created_at: string;
+  current_price: number | null;
+  day_change_pct: number | null;
 };
 
 export type LongtermCurrent = {

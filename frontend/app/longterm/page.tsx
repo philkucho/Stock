@@ -43,10 +43,18 @@ const GATE_LABEL: Record<string, string> = {
   above_ma200: "200일선 위",
   near_52w_high: "52주 고가",
   adv_ok: "거래대금",
+  // v2 펀더 게이트
+  revenue_growth: "매출↑",
+  valuation_ok: "P/E",
+  earnings_ok: "EPS↑",
 };
 
 function GateBadges({ gates }: { gates: Record<string, boolean> }) {
-  const keys = ["stage2", "above_ma200", "near_52w_high", "adv_ok"];
+  // 기술 게이트 4 + 펀더 게이트 3 (있으면)
+  const keys = [
+    "stage2", "above_ma200", "near_52w_high", "adv_ok",
+    "revenue_growth", "valuation_ok", "earnings_ok",
+  ].filter((k) => k in gates);
   return (
     <div className="flex flex-wrap gap-1">
       {keys.map((k) => {
@@ -80,6 +88,29 @@ function fmtScore(v: string | number | null | undefined): string {
   const n = typeof v === "string" ? parseFloat(v) : v;
   if (Number.isNaN(n)) return "—";
   return n.toFixed(2);
+}
+
+function fmtPrice(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** 전일대비 등락 — 상승 녹색 / 하락 빨강 */
+function DayChange({ v }: { v: number | null | undefined }) {
+  if (v === null || v === undefined || Number.isNaN(v))
+    return <span className="text-zinc-400">—</span>;
+  const cls =
+    v > 0
+      ? "text-emerald-600 dark:text-emerald-400"
+      : v < 0
+        ? "text-rose-600 dark:text-rose-400"
+        : "text-zinc-500";
+  return (
+    <span className={cls}>
+      {v > 0 ? "+" : ""}
+      {v.toFixed(1)}%
+    </span>
+  );
 }
 
 export default function LongtermPage() {
@@ -136,8 +167,8 @@ export default function LongtermPage() {
       <header className="space-y-2">
         <h1 className="text-2xl font-bold">📅 중장기 추천 (Fidelity 매수 가이드)</h1>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          3~12개월 보유 목적의 정량 시그널 기반 추천. Stage 2 추세 템플릿 + IBD 상대강도 + 12개월
-          모멘텀. 매월 첫 거래일 자동 갱신 · Fidelity 계좌 수동 발주용.
+          3~12개월 보유 목적의 정량 + 펀더멘털 추천. Stage 2 추세 + IBD 상대강도 + 12개월
+          모멘텀 + 매출/EPS 성장 + PEG 밸류에이션. 매월 첫 거래일 자동 갱신 · Fidelity 수동 발주용.
         </p>
       </header>
 
@@ -249,6 +280,8 @@ export default function LongtermPage() {
                   <tr className="text-left">
                     <th className="px-3 py-2">순위</th>
                     <th className="px-3 py-2">티커</th>
+                    <th className="px-3 py-2 text-right">현재가</th>
+                    <th className="px-3 py-2 text-right">전일대비</th>
                     <th className="px-3 py-2">상태</th>
                     <th className="px-3 py-2">권장 행동</th>
                     <th className="px-3 py-2 text-right">비중</th>
@@ -256,7 +289,18 @@ export default function LongtermPage() {
                     <th className="px-3 py-2">게이트</th>
                     <th className="px-3 py-2 text-right">RS</th>
                     <th className="px-3 py-2 text-right">12개월</th>
-                    <th className="px-3 py-2 text-right">200일 거리</th>
+                    <th className="px-3 py-2 text-right" title="최근 12개월 매출 YoY 성장">
+                      매출↑
+                    </th>
+                    <th className="px-3 py-2 text-right" title="최근 12개월 EPS YoY 성장">
+                      EPS↑
+                    </th>
+                    <th className="px-3 py-2 text-right" title="Forward P/E (낮을수록 저평가)">
+                      Fwd P/E
+                    </th>
+                    <th className="px-3 py-2 text-right" title="PEG = P/E ÷ 성장률. 1.0 미만 저평가">
+                      PEG
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -271,6 +315,12 @@ export default function LongtermPage() {
                           {p.rank}
                         </td>
                         <td className="px-3 py-2 font-semibold">{p.symbol}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {fmtPrice(p.current_price)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          <DayChange v={p.day_change_pct} />
+                        </td>
                         <td className="px-3 py-2">
                           <span
                             className={`rounded px-2 py-0.5 text-xs font-medium ${STATUS_COLOR[p.status]}`}
@@ -301,7 +351,20 @@ export default function LongtermPage() {
                           {fmtPct(brk.mom_12mo as number)}
                         </td>
                         <td className="px-3 py-2 text-right font-mono">
-                          {fmtPct(brk.sma200_dist as number)}
+                          {fmtPct(brk.rev_yoy as number)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {fmtPct(brk.eps_yoy as number)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {brk.forward_pe != null
+                            ? Number(brk.forward_pe).toFixed(1)
+                            : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {brk.peg_ratio != null
+                            ? Number(brk.peg_ratio).toFixed(2)
+                            : "—"}
                         </td>
                       </tr>
                     );
@@ -358,7 +421,7 @@ export default function LongtermPage() {
             <p>
               📌 게이트 4개 모두 통과 + 종합 점수 상위 10종목을 매월 균등 가중(10%)으로
               제안합니다. 직전 월 보유 중 상위 6개는 자동 유지, 신규 4 슬롯만 교체합니다.
-              백테스트(2018-2024 S&P 500): Sharpe 1.21 · 알파 +21.6%/년 · MDD -29%.
+              백테스트(2018-2024 S&P 500): Sharpe 1.15 · 알파 +19.5%/년 · MDD -28%.
             </p>
           </footer>
         </>

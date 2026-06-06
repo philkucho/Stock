@@ -139,11 +139,12 @@ def _evaluate_symbol(
     c6_margin = (sma200 / sma200_prev) - 1.0 if sma200_prev > 0 else 0.0
     low_52w = float(hist["low"].rolling(252).min().iloc[-1])
     c7_margin = (last_close / (low_52w * 1.30)) - 1.0 if low_52w > 0 else 0.0
-    c8_margin = (high_52w * 0.75) / last_close if last_close > 0 else 0.0  # 1.0이면 정확히 -25%
+    # c8: -25% 기준선 대비 여유 (0 = 정확히 -25%, 1/3 = 신고가). ×3으로 0~1 정규화.
+    c8_margin = (last_close / (high_52w * 0.75)) - 1.0 if high_52w > 0 else 0.0
     c_margin_score = (
         max(0.0, min(1.0, c6_margin / 0.05)) +   # 5%/m sma200 uptrend = 1.0
         max(0.0, min(1.0, c7_margin / 0.50)) +   # 52w low +30% 기준 +50% 추가 마진 = 1.0
-        max(0.0, min(1.0, c8_margin - 1.0))      # high의 75%↑ = 양수
+        max(0.0, min(1.0, c8_margin * 3.0))      # 신고가 도달 = 1.0
     ) / 3.0
 
     return {
@@ -169,6 +170,7 @@ def _score_candidates(candidates: list[dict]) -> list[dict]:
 
     raws = [c["rs_raw"] for c in candidates]
     sorted_raws = sorted(raws)
+    sorted_moms = sorted(c["mom_12mo"] for c in candidates)
     n = len(sorted_raws)
 
     for c in candidates:
@@ -177,8 +179,11 @@ def _score_candidates(candidates: list[dict]) -> list[dict]:
         rs_pct = max(1, min(99, round((below / n) * 99) + 1))
         c["rs_pct"] = rs_pct
 
-        # 12mo momentum: saturate at +100% = 1.0
-        mom_norm = max(0.0, min(1.0, c["mom_12mo"] / 1.0))
+        # 12mo momentum: cross-sectional percentile (강세장 +100% 캡 포화 방지)
+        below_m = sum(1 for m in sorted_moms if m < c["mom_12mo"])
+        mom_pct = max(1, min(99, round((below_m / n) * 99) + 1))
+        c["mom_pct"] = mom_pct
+        mom_norm = mom_pct / 99.0
 
         # 200SMA 상대거리: 0~+50%까지 +, 50~100% 감점 (extended)
         d = c["sma200_dist"]

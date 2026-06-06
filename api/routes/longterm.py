@@ -38,8 +38,29 @@ class LongtermPickOut(BaseModel):
     fidelity_action: str
     prev_pick_id: int | None
     created_at: datetime
+    # 라이브 현재가 (yfinance fast_info, /current 한정 — 실패 시 None)
+    current_price: float | None = None
+    day_change_pct: float | None = None
 
     model_config = {"from_attributes": True}
+
+
+def _fetch_quote(symbol: str) -> dict | None:
+    """현재가 + 전일대비 % — yfinance fast_info (advisor context_builder 패턴)."""
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(symbol).fast_info
+        last = float(info.get("lastPrice") or info.get("regularMarketPrice") or 0)
+        prev = float(info.get("previousClose") or 0)
+        if last <= 0:
+            return None
+        return {
+            "current_price": round(last, 2),
+            "day_change_pct": round((last / prev - 1) * 100, 2) if prev > 0 else None,
+        }
+    except Exception:
+        return None
 
 
 class LongtermOutcomeOut(BaseModel):
@@ -109,13 +130,25 @@ async def get_current(session: AsyncSession = Depends(get_session)) -> CurrentSu
 
     last_refreshed = max((p.created_at for p in picks), default=None)
 
+    # 활성 종목 현재가 병렬 조회 (실패해도 picks는 반환 — quote만 None)
+    active_syms = [p.symbol for p in picks if p.status != "exited"]
+    quotes = await asyncio.gather(
+        *[asyncio.to_thread(_fetch_quote, s) for s in active_syms]
+    )
+    quote_map = dict(zip(active_syms, quotes))
+
     return CurrentSummary(
         pick_month=latest_month,
         regime=regime,
         new_count=new_c, hold_count=hold_c,
         exit_suggested_count=es_c, exited_count=ex_c,
         last_refreshed_at=last_refreshed,
-        picks=[LongtermPickOut.model_validate(p) for p in picks],
+        picks=[
+            LongtermPickOut.model_validate(p).model_copy(
+                update=quote_map.get(p.symbol) or {}
+            )
+            for p in picks
+        ],
     )
 
 
