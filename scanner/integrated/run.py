@@ -3106,3 +3106,115 @@ async def run_integrated(
             )
         )
     return out
+
+
+# ─────────── Swing open-market mode (2026-06-05 도입, ORB 폐지 후속) ───────────
+
+SWING_ATR_PCT_CAP = 5.0  # ATR_pct > 5% 종목 제외 (ARM 등 고변동성 cap)
+SWING_ATR_MULT_STOP = 2.0  # entry - 20일 ATR × 2 = stop
+SWING_HOLD_DAYS = 5
+
+
+async def run_swing_picks(
+    target_date: date | None = None,
+    top: int = 3,
+    *,
+    session=None,
+    atr_pct_cap: float = SWING_ATR_PCT_CAP,
+    atr_mult_stop: float = SWING_ATR_MULT_STOP,
+    candidate_pool: int = 15,
+) -> list[PickCandidate]:
+    """Swing open-market watchlist — integrated v10 직접 + ATR cap.
+
+    백테스트 검증 (2026-03-27 ~ 2026-06-03, n=73):
+      win 75%, alpha +4.59%, MDD -4.96%, Sharpe(trade) 0.52.
+
+    설계 결정 (2026-06-05):
+      - Entry: 09:30 시장가
+      - Stop : entry - 20일 ATR × atr_mult_stop
+      - Filter: ATR_pct > atr_pct_cap → 제외 (ARM류 고변동성 차단)
+      - Exit  : 5영업일 후 종가 강제 (monitor 처리)
+      - Top N : preopen 단계 (5-Model Intraday Stack) 우회, v10 알파를 직접 사용
+
+    score_meta:
+      atr_pct, atr_mult_stop, provisional_entry/stop/target, hold_days,
+      swing_mode=True, version='swing_v1'
+    """
+    from signals.atr import atr as _atr_series, atr_pct as _atr_pct_series
+
+    today = target_date or date.today()
+
+    v10_picks = await run_integrated_v10(today, top=candidate_pool, session=session)
+    if not v10_picks:
+        logger.info("[swing] v10 returned no candidates for %s", today)
+        return []
+
+    end_iso = today.isoformat()
+    start_iso = (today - timedelta(days=60)).isoformat()
+
+    out: list[PickCandidate] = []
+    skipped: list[dict] = []
+
+    for vp in v10_picks:
+        try:
+            bars_full = get_bars(vp.symbol, start_iso, end_iso, "1d")
+            bars = _slice_to_date(bars_full, today)
+            if bars is None or len(bars) < 22:
+                skipped.append({"symbol": vp.symbol, "reason": "insufficient_bars"})
+                continue
+
+            atr_v = float(_atr_series(bars, period=20).iloc[-1])
+            entry_ref = float(bars["close"].iloc[-1])  # 어제 종가 — 09:30 trade phase가 실제 open으로 재계산
+            atr_pct_v = (atr_v / entry_ref) * 100.0 if entry_ref > 0 else 0.0
+
+            if atr_pct_v > atr_pct_cap:
+                skipped.append({
+                    "symbol": vp.symbol,
+                    "reason": f"atr_pct {atr_pct_v:.2f}% > cap {atr_pct_cap}%",
+                })
+                continue
+
+            stop_dist = atr_v * atr_mult_stop
+            provisional_stop = entry_ref - stop_dist
+            if provisional_stop <= 0:
+                skipped.append({"symbol": vp.symbol, "reason": "invalid_stop"})
+                continue
+            # take_profit은 5d 강제 exit이라 사실상 무효 — bracket 요건 충족용 (entry × 1.5)
+            provisional_target = entry_ref * 1.5
+
+            v10_meta = dict(vp.score_meta or {})
+            meta = {
+                "swing_mode": True,
+                "selection_path": "swing_v10_direct",
+                "v10_score": vp.score,
+                "v10_meta": v10_meta,
+                "atr": round(atr_v, 4),
+                "atr_pct": round(atr_pct_v, 3),
+                "atr_mult_stop": atr_mult_stop,
+                "provisional_entry": round(entry_ref, 4),
+                "provisional_stop": round(provisional_stop, 4),
+                "provisional_target": round(provisional_target, 4),
+                "hold_days": SWING_HOLD_DAYS,
+                "regime_score": v10_meta.get("regime_score"),
+                "regime_mode": v10_meta.get("regime_mode"),
+                "version": "swing_v1",
+            }
+            out.append(PickCandidate(
+                system_id="swing",
+                rank=len(out) + 1,
+                symbol=vp.symbol,
+                score=vp.score,
+                score_meta=meta,
+                sector=vp.sector,
+                strategy_tag="swing",
+            ))
+            if len(out) >= top:
+                break
+        except Exception as exc:
+            logger.warning("[swing] eval failed for %s: %s", vp.symbol, exc)
+            skipped.append({"symbol": vp.symbol, "reason": f"eval_error: {exc}"})
+
+    if skipped:
+        logger.info("[swing] skipped (%d): %s", len(skipped), skipped[:5])
+
+    return out

@@ -327,6 +327,20 @@ async def run_monitor(target: date | None = None) -> dict:
             logger.warning("[monitor] protective_stops failed (계속 진행): %s", exc)
             out["protective_stops_error"] = str(exc)
 
+        # --- (2.7) Swing 5d 보유 강제 exit (2026-06-05 swing mode 도입) ---
+        try:
+            swing_result = await _swing_force_exit(adapter, target)
+            out["swing_exits"] = swing_result
+            if swing_result.get("closed"):
+                send_heartbeat(
+                    phase="monitor", status="alert",
+                    message=f"🔚 Swing 5d 강제 exit: {len(swing_result['closed'])}건",
+                    details=swing_result,
+                )
+        except Exception as exc:
+            logger.warning("[monitor] swing_force_exit failed (계속 진행): %s", exc)
+            out["swing_exits_error"] = str(exc)
+
         # --- (3) Per-plan: 1차 hit → 2차 stop raise ---
         async with async_session_factory() as session:
             stmt = (
@@ -566,13 +580,20 @@ async def _check_daily_loss_limit(
 
 
 async def run_preopen(target: date) -> dict:
-    """Phase 4: Preopen (09:25 ET) — 5-Model Intraday Stack 으로 watchlist 산출.
+    """Phase 4: Preopen (09:25 ET) — Swing watchlist 산출 (2026-06-05 swing mode 전환).
 
-    1. v10 + 운영 v3 + catalyst + regime 통합 (`run_integrated_intraday`)
-    2. Top 5 watchlist를 trade_plans 테이블에 upsert (confirm_status='watchlist')
-    3. provisional entry/stop/target은 score_meta에서 복사
+    이전 (~2026-06-04): 5-Model Intraday Stack → 09:45 ORB confirm
+    현재 (swing v1)  : integrated v10 직접 + ATR cap 5% → 09:30 시장가 진입
 
-    실제 ORB-based 가격/sizing은 Phase 5 (09:45 confirm) 에서 덮어씀.
+    배경: 2026-06-05 진단에서 14일 watchlist 0발송. 원인은 ORB gate가 swing 알파를
+    100% 차단. 14건의 실제 1d alpha +5.13%/win 89%, 10d alpha +10.83%/win 100% 실증.
+    백테스트 70d n=73: alpha +4.59% win 75% MDD -4.96%.
+
+    파이프라인:
+      1. run_swing_picks (= run_integrated_v10 + ATR cap + top 3)
+      2. dispatch_mode='swing' 마킹
+      3. entry/stop은 어제 종가 기준 provisional, target은 entry × 1.5 (bracket 요건용)
+      4. shares=1 placeholder — 09:30 trade phase가 0.5% risk sizing 으로 재계산
     """
     from decimal import Decimal
 
@@ -580,17 +601,17 @@ async def run_preopen(target: date) -> dict:
 
     from api.db import async_session_factory
     from api.db.models import TradePlan
-    from scanner.integrated.run import run_integrated_intraday
+    from scanner.integrated.run import run_swing_picks
 
     out: dict = {"date": target.isoformat(), "watchlist": [], "skipped": []}
 
     async with async_session_factory() as session:
-        picks = await run_integrated_intraday(target, top=5, session=session)
+        picks = await run_swing_picks(target, top=3, session=session)
 
     out["pick_count"] = len(picks)
     if not picks:
         out["status"] = "no_picks"
-        logger.warning("[preopen] no intraday picks for %s", target)
+        logger.warning("[preopen] no swing picks for %s", target)
         return out
 
     rows: list[dict] = []
@@ -598,9 +619,8 @@ async def run_preopen(target: date) -> dict:
         meta = p.score_meta or {}
         entry = float(meta.get("provisional_entry") or 0.0)
         stop = float(meta.get("provisional_stop") or 0.0)
-        t1 = float(meta.get("provisional_target_1r") or 0.0)
-        t2 = float(meta.get("provisional_target_2r") or 0.0)
-        if entry <= 0 or stop <= 0 or t1 <= 0 or t2 <= 0:
+        target_px = float(meta.get("provisional_target") or 0.0)
+        if entry <= 0 or stop <= 0 or target_px <= 0:
             out["skipped"].append({"symbol": p.symbol, "reason": "missing_provisional_levels"})
             continue
         risk_per_share = entry - stop
@@ -608,7 +628,7 @@ async def run_preopen(target: date) -> dict:
             out["skipped"].append({"symbol": p.symbol, "reason": "invalid_provisional_r"})
             continue
 
-        # Placeholder shares/amount — Phase 5 가 실제 sizing 으로 덮어씀
+        # Placeholder shares/amount — trade phase가 실시간 equity로 sizing 재계산
         provisional_shares = 1
         provisional_amount = entry * provisional_shares
 
@@ -619,8 +639,9 @@ async def run_preopen(target: date) -> dict:
             "amount_usd": Decimal(f"{provisional_amount:.2f}"),
             "entry_price": Decimal(f"{entry:.4f}"),
             "stop_price": Decimal(f"{stop:.4f}"),
-            "target_1r": Decimal(f"{t1:.4f}"),
-            "target_2r": Decimal(f"{t2:.4f}"),
+            # swing은 5d 종가 강제 exit이라 target 무의미 → entry × 1.5 두 컬럼 동일
+            "target_1r": Decimal(f"{target_px:.4f}"),
+            "target_2r": Decimal(f"{target_px:.4f}"),
             "composite_score": Decimal(f"{float(p.score):.2f}"),
             "score_meta": meta,
             "sector": p.sector,
@@ -629,7 +650,7 @@ async def run_preopen(target: date) -> dict:
             "premarket_gap_pct": Decimal(f"{float(meta.get('premarket_gap_pct', 0) or 0):.3f}"),
             "premarket_rvol": Decimal(f"{float(meta.get('premarket_rvol', 0) or 0):.3f}"),
             "confirm_status": "watchlist",
-            "dispatch_mode": "orb_auto",
+            "dispatch_mode": "swing",
         })
 
     if not rows:
@@ -702,12 +723,25 @@ async def run_preopen(target: date) -> dict:
 
 
 async def run_confirm_phase(target: date) -> dict:
-    """Phase 5: Confirm (09:45 ET) — ORB+VWAP+RVOL 평가 → 통과한 top N bracket 발송.
+    """Phase 5: Confirm (09:45 ET) — DEPRECATED (2026-06-05 swing mode 전환으로 폐지).
 
-    `scripts/intraday_confirm.run_confirm`을 호출하는 thin wrapper.
+    이전 동작: orb_auto watchlist → ORB+VWAP+RVOL → bracket 발송.
+    폐지 사유:
+      - 14거래일(5/18~6/5) 0발송. 14건 모두 or_break fail.
+      - 14건의 실제 1d alpha +5.13%/win 89%, 10d +10.83%/win 100% — ORB가 알파를 차단.
+      - 백테스트 70d: swing mode alpha +4.59% win 75%로 검증.
+
+    Swing 으로 09:30 trade phase에서 시장가 진입 + ATR×2 stop + 5d 보유로 대체.
+    intraday_confirm.run_confirm 자체는 보존 (수동 dry-run 진단용).
     """
-    from scripts.intraday_confirm import run_confirm
-    return await run_confirm(target)
+    logger.info(
+        "[confirm] DEPRECATED — swing mode 전환 (2026-06-05). 09:45 ORB 평가 폐지."
+    )
+    return {
+        "status": "disabled",
+        "reason": "swing_mode_v1 — confirm phase 폐지, 09:30 trade phase로 통합",
+        "target": target.isoformat(),
+    }
 
 
 async def run_trade(target: date, *, position_cap: int = 5) -> dict:
@@ -758,21 +792,24 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
     except Exception as exc:
         logger.warning("[trade] advisor expire failed: %s", exc)
 
-    # 1) 사용자 입력 plans 조회 (dispatch_mode='user_fixed'만 — orb_auto는 09:45 confirm이 처리)
+    # 1) 발송 대상 plans 조회:
+    #    - dispatch_mode='user_fixed' : 사용자 /trading 입력
+    #    - dispatch_mode='swing'      : preopen 09:25 산출 (2026-06-05 swing mode 도입)
+    #    (legacy 'orb_auto'은 09:45 confirm phase가 처리했으나 swing 전환과 함께 폐지)
     async with async_session_factory() as session:
         stmt = (
             select(TradePlan)
             .where(TradePlan.plan_date == target)
-            .where(TradePlan.dispatch_mode == "user_fixed")
-            .order_by(TradePlan.rank)
+            .where(TradePlan.dispatch_mode.in_(["user_fixed", "swing"]))
+            .order_by(TradePlan.dispatch_mode.desc(), TradePlan.rank)  # user_fixed 우선
         )
         plans = list((await session.execute(stmt)).scalars().all())
 
     out["plans_count"] = len(plans)
     if not plans:
         out["status"] = "no_plans"
-        out["reason"] = "사용자가 오늘 trade plan을 입력하지 않음 (user_fixed)"
-        logger.info("[trade] no user_fixed plans for %s — 사용자 입력 대기", target)
+        out["reason"] = "오늘 user_fixed/swing plan 없음"
+        logger.info("[trade] no plans for %s", target)
         return out
 
     # 2) Regime check (사용자 입력 plan이 있어도 방어모드면 차단)
@@ -890,70 +927,106 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
             t2 = float(plan.target_2r)
             qty = int(plan.shares)
             amount = float(plan.amount_usd)
+            is_swing = plan.dispatch_mode == "swing"
 
-            if entry <= 0 or stop <= 0 or t1 <= 0 or t2 <= 0 or stop >= entry or t1 <= entry:
+            # 공통 검증
+            if entry <= 0 or stop <= 0 or stop >= entry:
                 out["skipped"].append({
                     "symbol": sym,
-                    "reason": f"invalid_prices entry=${entry:.2f} stop=${stop:.2f} t1=${t1:.2f} t2=${t2:.2f}",
-                })
-                continue
-            if t2 <= t1:
-                out["skipped"].append({
-                    "symbol": sym,
-                    "reason": f"targets_inverted t1=${t1:.2f} >= t2=${t2:.2f}",
-                })
-                continue
-            # penny 반올림 충돌
-            if _penny(t1) == _penny(t2):
-                out["skipped"].append({
-                    "symbol": sym,
-                    "reason": f"targets_equal_after_penny t1=t2=${_penny(t1)}",
-                })
-                continue
-            if qty <= 0:
-                out["skipped"].append({"symbol": sym, "reason": "qty_zero"})
-                continue
-
-            # buying_power 검증 (1차+2차 합산은 qty와 동일 — entry는 한 번만 체결)
-            need = qty * entry
-            if total_budget + need > acc.buying_power:
-                out["skipped"].append({
-                    "symbol": sym,
-                    "reason": f"insufficient_buying_power need=${need:,.0f} remaining=${acc.buying_power - total_budget:,.0f}",
+                    "reason": f"invalid_entry_stop entry=${entry:.2f} stop=${stop:.2f}",
                 })
                 continue
 
-            # 2-tier 분할
-            qty_1, qty_2 = qty_split_50_50(qty)
-            is_two_tier = qty_2 > 0  # qty=1이면 1-tier fallback
-
-            if is_two_tier:
+            if is_swing:
+                # ── swing: 시장가 BUY + ATR×2 stop ── (2026-06-05 도입)
+                # qty 재계산: equity × SWING_RISK_PCT / (entry - stop)
+                swing_risk_pct = float(os.environ.get("SWING_RISK_PCT", "0.005"))
+                risk_dollars = acc.equity * swing_risk_pct
+                qty = int(risk_dollars / (entry - stop))
+                if qty <= 0:
+                    out["skipped"].append({
+                        "symbol": sym,
+                        "reason": f"swing_qty_zero risk=${risk_dollars:.0f} R=${entry-stop:.2f}",
+                    })
+                    continue
+                # take_profit은 5d 강제 exit이라 무효 — bracket 요건 충족용 (entry × 1.5)
+                tp_swing = entry * 1.5
+                # buying_power 검증 (시장가는 실제 fill 가격이 entry와 다를 수 있어 +5% 여유)
+                need = qty * entry * 1.05
+                if total_budget + need > acc.buying_power:
+                    out["skipped"].append({
+                        "symbol": sym,
+                        "reason": f"insufficient_bp_swing need=${need:,.0f} remaining=${acc.buying_power - total_budget:,.0f}",
+                    })
+                    continue
                 req = BracketOrderRequest(
                     symbol=sym,
                     qty=qty,
                     side="BUY",
-                    entry_type="stop_limit",
-                    entry_price=entry,
+                    entry_type="market",  # 09:30 시장가
+                    entry_price=None,
                     stop_loss_price=stop,
-                    # GTC: parent+child가 마감 후에도 살아있어야 stop/tp 보호가 유지됨.
-                    # (DAY는 자식이 9:35경 expire/cancel되는 사고가 발생 — 2026-05-14 사고)
+                    take_profit_price=tp_swing,
                     time_in_force="gtc",
-                    is_two_tier=True,
-                    target_1_price=t1, target_1_qty=qty_1,
-                    target_2_price=t2, target_2_qty=qty_2,
                 )
+                amount = qty * entry  # 표기용
+                qty_1, qty_2 = qty, 0
+                is_two_tier = False
+                t1, t2 = tp_swing, tp_swing  # 로깅 통일
             else:
-                # qty=1 fallback: 단일 BRACKET (target_1r만)
-                req = BracketOrderRequest(
-                    symbol=sym,
-                    qty=qty,
-                    side="BUY",
-                    entry_type="stop_limit",
-                    entry_price=entry,
-                    stop_loss_price=stop,
-                    take_profit_price=t1,
-                    time_in_force="gtc",
-                )
+                # ── user_fixed: 기존 2-tier stop_limit bracket ──
+                if t1 <= 0 or t2 <= 0 or t1 <= entry:
+                    out["skipped"].append({
+                        "symbol": sym,
+                        "reason": f"invalid_prices entry=${entry:.2f} t1=${t1:.2f} t2=${t2:.2f}",
+                    })
+                    continue
+                if t2 <= t1:
+                    out["skipped"].append({
+                        "symbol": sym,
+                        "reason": f"targets_inverted t1=${t1:.2f} >= t2=${t2:.2f}",
+                    })
+                    continue
+                if _penny(t1) == _penny(t2):
+                    out["skipped"].append({
+                        "symbol": sym,
+                        "reason": f"targets_equal_after_penny t1=t2=${_penny(t1)}",
+                    })
+                    continue
+                if qty <= 0:
+                    out["skipped"].append({"symbol": sym, "reason": "qty_zero"})
+                    continue
+
+                # buying_power 검증 (1차+2차 합산은 qty와 동일 — entry는 한 번만 체결)
+                need = qty * entry
+                if total_budget + need > acc.buying_power:
+                    out["skipped"].append({
+                        "symbol": sym,
+                        "reason": f"insufficient_buying_power need=${need:,.0f} remaining=${acc.buying_power - total_budget:,.0f}",
+                    })
+                    continue
+
+                qty_1, qty_2 = qty_split_50_50(qty)
+                is_two_tier = qty_2 > 0
+                if is_two_tier:
+                    req = BracketOrderRequest(
+                        symbol=sym, qty=qty, side="BUY",
+                        entry_type="stop_limit", entry_price=entry,
+                        stop_loss_price=stop,
+                        # GTC: parent+child가 마감 후에도 살아있어야 stop/tp 보호 유지
+                        # (DAY는 자식이 9:35경 expire — 2026-05-14 사고)
+                        time_in_force="gtc",
+                        is_two_tier=True,
+                        target_1_price=t1, target_1_qty=qty_1,
+                        target_2_price=t2, target_2_qty=qty_2,
+                    )
+                else:
+                    req = BracketOrderRequest(
+                        symbol=sym, qty=qty, side="BUY",
+                        entry_type="stop_limit", entry_price=entry,
+                        stop_loss_price=stop, take_profit_price=t1,
+                        time_in_force="gtc",
+                    )
 
             try:
                 orders = await adapter.place_bracket_order(req)
@@ -971,6 +1044,7 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
                         await s2.commit()
                 out["orders"].append({
                     "symbol": sym,
+                    "dispatch_mode": plan.dispatch_mode,
                     "qty": qty,
                     "qty_1r": qty_1, "qty_2r": qty_2,
                     "amount_usd": round(amount, 2),
@@ -983,11 +1057,18 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
                     "order_ids": order_ids,
                     "statuses": [o.status for o in orders],
                 })
-                logger.info(
-                    "[trade] %s qty=%d (split %d+%d, $%.0f) entry=$%.2f stop=$%.2f t1=$%.2f t2=$%.2f orders=%s",
-                    sym, qty, qty_1, qty_2, amount, entry, stop, t1, t2,
-                    [oid[:12] for oid in order_ids],
-                )
+                if is_swing:
+                    logger.info(
+                        "[trade] SWING %s qty=%d market BUY stop=$%.2f (risk=$%.0f) orders=%s",
+                        sym, qty, stop, qty * (entry - stop),
+                        [oid[:12] for oid in order_ids],
+                    )
+                else:
+                    logger.info(
+                        "[trade] %s qty=%d (split %d+%d, $%.0f) entry=$%.2f stop=$%.2f t1=$%.2f t2=$%.2f orders=%s",
+                        sym, qty, qty_1, qty_2, amount, entry, stop, t1, t2,
+                        [oid[:12] for oid in order_ids],
+                    )
             except Exception as exc:
                 out["skipped"].append({"symbol": sym, "reason": f"order_fail: {exc}"})
                 logger.exception("[trade] place_bracket_order failed for %s", sym)
@@ -999,6 +1080,128 @@ async def run_trade(target: date, *, position_cap: int = 5) -> dict:
         await adapter.close()
 
     return out
+
+
+def _trading_days_after(start: date, n: int) -> date:
+    """start 기준 n 영업일 후 날짜 (주말 skip; 휴장일은 보수적으로 미고려)."""
+    cur = start
+    cnt = 0
+    while cnt < n:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:  # Mon=0 ... Fri=4
+            cnt += 1
+    return cur
+
+
+async def _swing_force_exit(adapter, target: date) -> dict:
+    """Swing dispatch_mode plan의 5d 만료 강제 close (2026-06-05 swing mode 도입).
+
+    조건:
+      - plan.dispatch_mode == 'swing'
+      - plan.confirm_status == 'sent'
+      - hold_days(기본 5) 만큼 영업일 경과
+      - 보유 qty > 0 → close_position
+      - 보유 qty == 0 (stop hit 등으로 자연 청산) → meta에 마킹만
+
+    멱등성: score_meta.swing_force_exited 플래그 — 중복 close 방지.
+    """
+    from sqlalchemy import select
+
+    from api.db.models import TradePlan
+    from api.db.session import async_session_factory
+
+    result = {"closed": [], "skipped": []}
+
+    # 빠른 cutoff — 최소 7일(주말 포함 5영업일) 이전 plan만 후보
+    cutoff = target - timedelta(days=7)
+    async with async_session_factory() as s:
+        stmt = (
+            select(TradePlan)
+            .where(TradePlan.dispatch_mode == "swing")
+            .where(TradePlan.confirm_status == "sent")
+            .where(TradePlan.plan_date <= cutoff)
+            .order_by(TradePlan.plan_date)
+        )
+        plans = list((await s.execute(stmt)).scalars().all())
+
+    if not plans:
+        return result
+
+    try:
+        positions = await adapter.get_positions()
+    except Exception as exc:
+        result["error"] = f"positions_fetch_failed: {exc}"
+        return result
+    held_by_sym = {p.symbol.upper(): p for p in positions}
+
+    for plan in plans:
+        sym = plan.symbol.upper()
+        meta = plan.score_meta or {}
+        if meta.get("swing_force_exited"):
+            continue  # 이미 처리
+
+        hold_days = int(meta.get("hold_days") or 5)
+        exit_date = _trading_days_after(plan.plan_date, hold_days)
+        if target < exit_date:
+            continue  # 아직 만료 전
+
+        pos = held_by_sym.get(sym)
+        if pos is None or pos.qty <= 0:
+            # 이미 stop hit 등으로 자연 청산 → 마킹만
+            async with async_session_factory() as s2:
+                p2 = await s2.get(TradePlan, plan.id)
+                if p2:
+                    nm = dict(p2.score_meta or {})
+                    nm["swing_force_exited"] = True
+                    nm["swing_exit_reason"] = "already_flat"
+                    nm["swing_exit_date"] = target.isoformat()
+                    p2.score_meta = nm
+                    await s2.commit()
+            result["skipped"].append({
+                "symbol": sym,
+                "plan_date": plan.plan_date.isoformat(),
+                "reason": "already_flat",
+            })
+            continue
+
+        try:
+            ok = await adapter.close_position(sym)
+            if ok:
+                async with async_session_factory() as s2:
+                    p2 = await s2.get(TradePlan, plan.id)
+                    if p2:
+                        nm = dict(p2.score_meta or {})
+                        nm["swing_force_exited"] = True
+                        nm["swing_exit_reason"] = "5d_close"
+                        nm["swing_exit_date"] = target.isoformat()
+                        nm["swing_exit_qty"] = pos.qty
+                        nm["swing_exit_price"] = pos.current_price
+                        nm["swing_exit_unrealized_pl"] = pos.unrealized_pl
+                        p2.score_meta = nm
+                        await s2.commit()
+                result["closed"].append({
+                    "symbol": sym,
+                    "plan_date": plan.plan_date.isoformat(),
+                    "exit_date_target": exit_date.isoformat(),
+                    "qty": pos.qty,
+                    "current_price": pos.current_price,
+                    "unrealized_pl": pos.unrealized_pl,
+                    "unrealized_pl_pct": pos.unrealized_pl_pct,
+                })
+                logger.info(
+                    "[monitor] SWING %s 5d 만료 강제 close: qty=%d @$%.2f PL=$%.2f (%.2f%%)",
+                    sym, pos.qty, pos.current_price,
+                    pos.unrealized_pl, pos.unrealized_pl_pct,
+                )
+            else:
+                result["skipped"].append({
+                    "symbol": sym, "reason": "close_position_returned_false",
+                })
+        except Exception as exc:
+            logger.exception("[monitor] swing force exit failed for %s", sym)
+            result["skipped"].append({"symbol": sym, "reason": f"exit_error: {exc}"})
+
+    return result
 
 
 async def _ensure_protective_stops(adapter, target: date) -> dict:
