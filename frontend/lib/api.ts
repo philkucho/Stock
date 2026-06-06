@@ -1267,3 +1267,71 @@ export async function refreshLongterm(dryRun: boolean = false): Promise<{
   if (!res.ok) throw new Error(`Longterm refresh failed: ${res.status}`);
   return res.json();
 }
+
+export type SeriesPoint = { date: string; value: number | null };
+
+export type ChecklistItem = {
+  key: string;
+  label: string;
+  value: number | null;
+  status: "green" | "yellow" | "red" | "unknown";
+  comment: string;
+};
+
+export type LongtermDetail = {
+  symbol: string;
+  snapshot: {
+    sector: string | null;
+    industry: string | null;
+    current_price: number | null;
+    fifty_two_week_high: number | null;
+    fifty_two_week_low: number | null;
+    high_52w_dist_pct: number | null;
+    next_earnings_date: string | null;
+    days_to_earnings: number | null;
+    long_business_summary: string | null;
+  };
+  margins_latest: {
+    gross: number | null;
+    operating: number | null;
+    net: number | null;
+    fcf: number | null;
+  };
+  valuation: {
+    forward_pe: number | null;
+    ev_ebitda: number | null;
+    ev_revenue: number | null;
+    price_to_book: number | null;
+    price_to_sales: number | null;
+  };
+  risk: {
+    beta: number | null;
+    institutional_pct: number | null;
+    insider_pct: number | null;
+    short_ratio: number | null;
+  };
+  series: {
+    quarterly_revenue: SeriesPoint[];
+    quarterly_eps: SeriesPoint[];
+    quarterly_net_income: SeriesPoint[];
+    quarterly_operating_income: SeriesPoint[];
+    quarterly_gross_profit: SeriesPoint[];
+    annual_revenue: SeriesPoint[];
+    annual_net_income: SeriesPoint[];
+    annual_eps: SeriesPoint[];
+    quarterly_ocf: SeriesPoint[];
+    quarterly_fcf: SeriesPoint[];
+    quarterly_total_debt: SeriesPoint[];
+    quarterly_equity: SeriesPoint[];
+  };
+  checklist: ChecklistItem[];
+  fetched_at: string;
+};
+
+export async function fetchLongtermDetail(symbol: string): Promise<LongtermDetail> {
+  const res = await fetch(`${API_BASE}/api/longterm/detail/${encodeURIComponent(symbol)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Detail fetch failed: ${res.status}`);
+  return res.json();
+}

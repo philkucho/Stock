@@ -155,6 +155,125 @@ def load_cached_universe() -> dict[str, dict]:
     return out
 
 
+# ─────── Detail (lazy fetch) — 상세 페이지용 풀 시리즈 + 추가 info ───────
+
+DETAIL_CACHE_DIR = REPO_ROOT / "data" / "cache" / "fundamentals_detail"
+DETAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+DETAIL_TTL_DAYS = 30
+
+
+def _detail_cache_path(symbol: str) -> Path:
+    return DETAIL_CACHE_DIR / f"{symbol.upper()}.json"
+
+
+def _series_from_df(df, row: str, n: int = 8) -> list[dict] | None:
+    """yfinance financials DataFrame에서 row 추출 → [{date, value}, ...] (최신순)."""
+    if df is None or df.empty or row not in df.index:
+        return None
+    cols = list(df.columns)[:n]
+    out = []
+    for c in cols:
+        v = df.loc[row, c]
+        if v is None or (isinstance(v, float) and (v != v)):  # NaN
+            out.append({"date": str(c)[:10], "value": None})
+        else:
+            try:
+                out.append({"date": str(c)[:10], "value": float(v)})
+            except (ValueError, TypeError):
+                out.append({"date": str(c)[:10], "value": None})
+    return out
+
+
+def fetch_one_detail(symbol: str, *, refresh: bool = False) -> dict | None:
+    """단일 종목 상세 — 분기/연간 시리즈 + 추가 info. 30일 TTL 캐시.
+
+    Returns: dict with quarterly/annual series + valuation + risk metrics.
+    """
+    path = _detail_cache_path(symbol)
+    if not refresh and _is_fresh(path, ttl_days=DETAIL_TTL_DAYS):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        if not info:
+            return None
+
+        qis = ticker.quarterly_income_stmt  # 분기 손익
+        ais = ticker.income_stmt             # 연간 손익
+        qbs = ticker.quarterly_balance_sheet  # 분기 재무상태
+        qcf = ticker.quarterly_cashflow       # 분기 현금흐름
+        try:
+            ed = ticker.earnings_dates  # 다가오는/과거 어닝 일정
+        except Exception:
+            ed = None
+    except Exception as exc:
+        logger.debug("detail fetch fail %s: %s", symbol, exc)
+        return None
+
+    # 다음 어닝
+    next_earnings = None
+    try:
+        if ed is not None and not ed.empty:
+            now = pd.Timestamp.now(tz=ed.index.tz)
+            fut = [d for d in ed.index if d > now]
+            if fut:
+                next_earnings = str(fut[-1])[:10]
+    except Exception:
+        pass
+
+    record = {
+        "symbol": symbol.upper(),
+        "fetched_at": datetime.now().isoformat(),
+        # ── 추가 info (점수 v2엔 미포함, detail UI용) ──
+        "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+        "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
+        "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
+        "beta": info.get("beta"),
+        "ev_ebitda": info.get("enterpriseToEbitda"),
+        "ev_revenue": info.get("enterpriseToRevenue"),
+        "price_to_book": info.get("priceToBook"),
+        "price_to_sales": info.get("priceToSalesTrailing12Months"),
+        "institutional_pct": info.get("heldPercentInstitutions"),
+        "insider_pct": info.get("heldPercentInsiders"),
+        "short_ratio": info.get("shortRatio"),
+        "shares_outstanding": info.get("sharesOutstanding"),
+        "next_earnings_date": next_earnings,
+        "sector": info.get("sector"),
+        "industry": info.get("industry"),
+        "long_business_summary": (info.get("longBusinessSummary") or "")[:600],
+        # ── 분기 시리즈 (4분기, 최신순) ──
+        "quarterly_revenue": _series_from_df(qis, "Total Revenue", 8),
+        "quarterly_gross_profit": _series_from_df(qis, "Gross Profit", 8),
+        "quarterly_operating_income": _series_from_df(qis, "Operating Income", 8),
+        "quarterly_net_income": _series_from_df(qis, "Net Income", 8),
+        "quarterly_eps": _series_from_df(qis, "Diluted EPS", 8),
+        # ── 연간 시리즈 (4년) ──
+        "annual_revenue": _series_from_df(ais, "Total Revenue", 5),
+        "annual_net_income": _series_from_df(ais, "Net Income", 5),
+        "annual_eps": _series_from_df(ais, "Diluted EPS", 5),
+        # ── 현금흐름 (4분기) ──
+        "quarterly_ocf": _series_from_df(qcf, "Operating Cash Flow", 8),
+        "quarterly_fcf": _series_from_df(qcf, "Free Cash Flow", 8),
+        "quarterly_capex": _series_from_df(qcf, "Capital Expenditure", 8),
+        # ── 재무상태 (4분기) ──
+        "quarterly_total_debt": _series_from_df(qbs, "Total Debt", 8),
+        "quarterly_equity": _series_from_df(qbs, "Stockholders Equity", 8),
+        "quarterly_current_assets": _series_from_df(qbs, "Current Assets", 8),
+        "quarterly_current_liab": _series_from_df(qbs, "Current Liabilities", 8),
+        "quarterly_cash": _series_from_df(qbs, "Cash And Cash Equivalents", 8),
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(record, f, indent=2)
+    return record
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     ap = argparse.ArgumentParser()

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import TopNav from "@/components/TopNav";
@@ -286,7 +287,6 @@ export default function LongtermPage() {
                     <th className="px-3 py-2">권장 행동</th>
                     <th className="px-3 py-2 text-right">비중</th>
                     <th className="px-3 py-2 text-right">종합 점수</th>
-                    <th className="px-3 py-2">게이트</th>
                     <th className="px-3 py-2 text-right">RS</th>
                     <th className="px-3 py-2 text-right">12개월</th>
                     <th className="px-3 py-2 text-right" title="최근 12개월 매출 YoY 성장">
@@ -314,7 +314,14 @@ export default function LongtermPage() {
                         <td className="px-3 py-2 font-mono">
                           {p.rank}
                         </td>
-                        <td className="px-3 py-2 font-semibold">{p.symbol}</td>
+                        <td className="px-3 py-2 font-semibold">
+                          <Link
+                            href={`/longterm/${p.symbol}`}
+                            className="text-emerald-700 hover:underline dark:text-emerald-400"
+                          >
+                            {p.symbol}
+                          </Link>
+                        </td>
                         <td className="px-3 py-2 text-right font-mono">
                           {fmtPrice(p.current_price)}
                         </td>
@@ -340,9 +347,6 @@ export default function LongtermPage() {
                         </td>
                         <td className="px-3 py-2 text-right font-mono font-semibold">
                           {fmtScore(p.composite_score)}
-                        </td>
-                        <td className="px-3 py-2">
-                          <GateBadges gates={p.gate_results} />
                         </td>
                         <td className="px-3 py-2 text-right font-mono">
                           {brk.rs_pct ?? "—"}
@@ -394,7 +398,14 @@ export default function LongtermPage() {
                         key={p.id}
                         className="border-t border-rose-200 dark:border-rose-900"
                       >
-                        <td className="px-3 py-2 font-semibold">{p.symbol}</td>
+                        <td className="px-3 py-2 font-semibold">
+                          <Link
+                            href={`/longterm/${p.symbol}`}
+                            className="text-emerald-700 hover:underline dark:text-emerald-400"
+                          >
+                            {p.symbol}
+                          </Link>
+                        </td>
                         <td className="px-3 py-2">
                           <span
                             className={`rounded px-2 py-0.5 text-xs ${STATUS_COLOR[p.status]}`}
