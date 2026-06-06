@@ -36,6 +36,10 @@ class PositionOut(BaseModel):
     # NOTE: Alpaca 보유 포지션은 unrealized만 제공. 기존 필드명 유지(프론트 호환).
     # 프론트 라벨은 "미실현 PnL"로 변경됨.
     realized_pnl: Decimal
+    # 홈 대시보드용 — 현재가/평가금액/미실현 수익률(%)
+    current_price: float | None = None
+    market_value: float | None = None
+    unrealized_pl_pct: float | None = None
     updated_at: datetime
 
 
@@ -121,6 +125,9 @@ async def list_positions() -> list[PositionOut]:
             quantity=Decimal(str(p.qty)),
             avg_price=Decimal(str(p.avg_entry_price)),
             realized_pnl=Decimal(str(p.unrealized_pl)),
+            current_price=p.current_price,
+            market_value=p.market_value,
+            unrealized_pl_pct=p.unrealized_pl_pct,
             updated_at=now,
         )
         for p in positions

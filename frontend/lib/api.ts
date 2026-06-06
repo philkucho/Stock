@@ -11,8 +11,14 @@ export async function fetchHealth(): Promise<{ status: string; version: string }
 }
 
 export type Account = {
+  account_id: string;
   balance_usd: number | null;
+  equity: number | null;
+  last_equity: number | null;
   buying_power: number | null;
+  pattern_day_trader: boolean;
+  trading_blocked: boolean;
+  daily_pnl_pct: number | null;
   status: string;
 };
 
@@ -1070,6 +1076,9 @@ export type Position = {
   quantity: string;
   avg_price: string;
   realized_pnl: string;
+  current_price: number | null;
+  market_value: number | null;
+  unrealized_pl_pct: number | null;
   updated_at: string;
 };
 
