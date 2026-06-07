@@ -1290,6 +1290,7 @@ export type LongtermDetail = {
     next_earnings_date: string | null;
     days_to_earnings: number | null;
     long_business_summary: string | null;
+    korean_business_summary: string | null;
   };
   margins_latest: {
     gross: number | null;

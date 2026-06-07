@@ -166,6 +166,73 @@ def _detail_cache_path(symbol: str) -> Path:
     return DETAIL_CACHE_DIR / f"{symbol.upper()}.json"
 
 
+def _clean_korean_preface(text: str) -> str:
+    """Gemini가 가끔 추가하는 preface ('다음은 ... 의역 ...') 제거."""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    while lines and any(
+        kw in lines[0]
+        for kw in ("의역", "번역", "다음은", "내용입니다", "회사 설명")
+    ):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _translate_to_korean(
+    text: str, *, max_chars: int = 800, retry_on_429: bool = True
+) -> str | None:
+    """Gemini 2.5 Flash로 영문 회사 설명 → 한국어 요약. 실패 시 None.
+
+    무료 티어 5 RPM — 429 발생 시 12초 sleep 후 1회 재시도.
+    """
+    import os as _os
+    import time as _time
+
+    api_key = _os.environ.get("GOOGLE_API_KEY")
+    if not api_key or not text:
+        return None
+
+    from google import genai
+    from google.genai import types as genai_types
+
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        "[지시] 아래 영문 회사 설명을 한국어로 3~5 문장 평문으로 번역해. "
+        "한국어 번역문만 출력. preface, 인사말, 마크다운, 번호 금지.\n\n"
+        f"[원문]\n{text[:1200]}"
+    )
+    cfg = genai_types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=700,
+        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+    )
+
+    for attempt in range(2 if retry_on_429 else 1):
+        try:
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=cfg,
+            )
+            out = _clean_korean_preface((resp.text or "").strip())
+            return out[:max_chars] if out else None
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                if attempt == 0 and retry_on_429:
+                    _time.sleep(13)
+                    continue
+                logger.warning("[longterm] translate rate-limited: %s", symbol_or_short(text))
+            else:
+                logger.warning("[longterm] translate fail: %s", str(exc)[:200])
+            return None
+    return None
+
+
+def symbol_or_short(text: str) -> str:
+    """로그용 짧은 식별자."""
+    return text[:40].replace("\n", " ") + "…"
+
+
 def _series_from_df(df, row: str, n: int = 8) -> list[dict] | None:
     """yfinance financials DataFrame에서 row 추출 → [{date, value}, ...] (최신순)."""
     if df is None or df.empty or row not in df.index:
@@ -193,7 +260,18 @@ def fetch_one_detail(symbol: str, *, refresh: bool = False) -> dict | None:
     if not refresh and _is_fresh(path, ttl_days=DETAIL_TTL_DAYS):
         try:
             with open(path) as f:
-                return json.load(f)
+                cached = json.load(f)
+            # Lazy translate: 기존 캐시에 한국어 설명 없으면 번역 후 저장 (refresh 없이)
+            if not cached.get("korean_business_summary") and cached.get("long_business_summary"):
+                ko = _translate_to_korean(cached["long_business_summary"])
+                if ko:
+                    cached["korean_business_summary"] = ko
+                    try:
+                        with open(path, "w") as f:
+                            json.dump(cached, f, indent=2)
+                    except Exception:
+                        pass
+            return cached
         except Exception:
             pass
 
@@ -226,6 +304,10 @@ def fetch_one_detail(symbol: str, *, refresh: bool = False) -> dict | None:
     except Exception:
         pass
 
+    # 영문 회사 설명 + 한국어 번역 (Gemini, best-effort)
+    raw_summary = (info.get("longBusinessSummary") or "")[:1500]
+    ko_summary = _translate_to_korean(raw_summary) if raw_summary else None
+
     record = {
         "symbol": symbol.upper(),
         "fetched_at": datetime.now().isoformat(),
@@ -245,7 +327,8 @@ def fetch_one_detail(symbol: str, *, refresh: bool = False) -> dict | None:
         "next_earnings_date": next_earnings,
         "sector": info.get("sector"),
         "industry": info.get("industry"),
-        "long_business_summary": (info.get("longBusinessSummary") or "")[:600],
+        "long_business_summary": raw_summary[:600],
+        "korean_business_summary": ko_summary,
         # ── 분기 시리즈 (4분기, 최신순) ──
         "quarterly_revenue": _series_from_df(qis, "Total Revenue", 8),
         "quarterly_gross_profit": _series_from_df(qis, "Gross Profit", 8),

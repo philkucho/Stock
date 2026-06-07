@@ -154,10 +154,30 @@ export default function LongtermDetailPage() {
                 </>
               )}
             </div>
-            {data.snapshot.long_business_summary && (
-              <p className="max-w-3xl text-sm text-zinc-600 dark:text-zinc-400">
-                {data.snapshot.long_business_summary}
-              </p>
+            {(data.snapshot.korean_business_summary ||
+              data.snapshot.long_business_summary) && (
+              <details className="max-w-3xl">
+                <summary className="cursor-pointer text-sm text-zinc-700 dark:text-zinc-300">
+                  {data.snapshot.korean_business_summary
+                    ? "🇰🇷 회사 설명 (한국어, Gemini 의역)"
+                    : "회사 설명"}
+                </summary>
+                <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+                  {data.snapshot.korean_business_summary ??
+                    data.snapshot.long_business_summary}
+                </p>
+                {data.snapshot.korean_business_summary &&
+                  data.snapshot.long_business_summary && (
+                    <details className="mt-3">
+                      <summary className="cursor-pointer text-xs text-zinc-500">
+                        원문 (영어) 보기
+                      </summary>
+                      <p className="mt-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                        {data.snapshot.long_business_summary}
+                      </p>
+                    </details>
+                  )}
+              </details>
             )}
           </header>
 

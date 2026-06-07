@@ -399,6 +399,7 @@ async def get_detail(symbol: str) -> dict:
             "next_earnings_date": r.get("next_earnings_date"),
             "days_to_earnings": days_to_er,
             "long_business_summary": r.get("long_business_summary"),
+            "korean_business_summary": r.get("korean_business_summary"),
         },
         "margins_latest": {
             "gross": round(gross_margin * 100, 2) if gross_margin is not None else None,
