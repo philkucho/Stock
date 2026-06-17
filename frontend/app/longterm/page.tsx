@@ -6,10 +6,88 @@ import { useEffect, useState } from "react";
 import TopNav from "@/components/TopNav";
 import {
   fetchLongtermCurrent,
+  fetchLongtermTiming,
   refreshLongterm,
   type LongtermCurrent,
   type LongtermPick,
+  type LongtermTiming,
 } from "@/lib/api";
+
+// 진입 시점(WHEN) 패널 — verdict별 색/라벨 (색맹 대비 텍스트 태그 동시 노출)
+const VERDICT_STYLE: Record<
+  string,
+  { box: string; accent: string; tag: string; tagCls: string }
+> = {
+  optimal: {
+    box: "border-emerald-400 bg-emerald-50 dark:border-emerald-600 dark:bg-emerald-950/40",
+    accent: "text-emerald-800 dark:text-emerald-200",
+    tag: "기회",
+    tagCls: "bg-emerald-600 text-white",
+  },
+  good: {
+    box: "border-emerald-300 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/30",
+    accent: "text-emerald-800 dark:text-emerald-200",
+    tag: "우호적",
+    tagCls: "bg-emerald-600 text-white",
+  },
+  ok: {
+    box: "border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30",
+    accent: "text-amber-800 dark:text-amber-200",
+    tag: "보통",
+    tagCls: "bg-amber-500 text-white",
+  },
+  neutral: {
+    box: "border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900",
+    accent: "text-zinc-700 dark:text-zinc-200",
+    tag: "중립",
+    tagCls: "bg-zinc-500 text-white",
+  },
+  suboptimal: {
+    box: "border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-950/40",
+    accent: "text-amber-900 dark:text-amber-200",
+    tag: "주의: 시점 비최적",
+    tagCls: "bg-amber-600 text-white",
+  },
+};
+
+function TimingPanel({ timing }: { timing: LongtermTiming | null }) {
+  if (!timing) return null;
+  const s = VERDICT_STYLE[timing.verdict] ?? VERDICT_STYLE.neutral;
+  return (
+    <section className={`rounded-xl border-2 p-4 ${s.box}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`rounded px-2 py-0.5 text-xs font-bold ${s.tagCls}`}>
+          {s.tag}
+        </span>
+        <h2 className={`text-lg font-bold ${s.accent}`}>{timing.label}</h2>
+      </div>
+      <p className={`mt-1 text-sm font-medium ${s.accent}`}>{timing.headline}</p>
+
+      {/* 왜 그런지 — 수치 근거 (P2: 의사결정 근거 노출) */}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {timing.reasons.map((r, i) => (
+          <span
+            key={i}
+            className="rounded-full border border-zinc-300 bg-white/70 px-2.5 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/60 dark:text-zinc-300"
+          >
+            {r}
+          </span>
+        ))}
+      </div>
+
+      {/* 진입한다면 어떻게 — 종목(WHAT)은 아래 표, 여기는 방법 */}
+      <div className="mt-3 rounded-lg border border-zinc-200 bg-white/80 p-3 dark:border-zinc-700 dark:bg-zinc-900/70">
+        <div className="text-xs font-semibold text-zinc-500">진입한다면</div>
+        <p className="mt-0.5 text-sm text-zinc-800 dark:text-zinc-100">
+          {timing.action}
+        </p>
+        <div className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
+          <span className="font-semibold">분할 제안:</span> {timing.sizing}
+        </div>
+      </div>
+    </section>
+  );
+}
 
 const STATUS_LABEL: Record<string, string> = {
   new: "신규",
@@ -116,6 +194,7 @@ function DayChange({ v }: { v: number | null | undefined }) {
 
 export default function LongtermPage() {
   const [data, setData] = useState<LongtermCurrent | null>(null);
+  const [timing, setTiming] = useState<LongtermTiming | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -124,6 +203,10 @@ export default function LongtermPage() {
   async function load() {
     setLoading(true);
     setError(null);
+    // 시점 신호는 라이브 시세 조회라 느릴 수 있어 비차단으로 별도 로드 (실패해도 표는 표시)
+    fetchLongtermTiming()
+      .then(setTiming)
+      .catch(() => setTiming(null));
     try {
       const d = await fetchLongtermCurrent();
       setData(d);
@@ -171,9 +254,17 @@ export default function LongtermPage() {
           3~12개월 보유 목적의 정량 + 펀더멘털 추천. Stage 2 추세 + IBD 상대강도 + 12개월
           모멘텀 + 매출/EPS 성장 + PEG 밸류에이션. 매월 첫 거래일 자동 갱신 · Fidelity 수동 발주용.
         </p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-500">
+          이 화면은 <span className="font-semibold">"어떤 종목(WHAT)"</span>(종목 표)과{" "}
+          <span className="font-semibold">"언제 진입(WHEN)"</span>(시점 신호)을 함께 보여줍니다 —
+          중장기 수익은 둘 다가 좌우합니다.
+        </p>
       </header>
 
-      {loading && <div className="text-sm text-zinc-500">불러오는 중…</div>}
+      {/* 진입 시점(WHEN) 신호 — 표와 독립적으로 우선 표시 */}
+      <TimingPanel timing={timing} />
+
+      {loading && <div className="text-sm text-zinc-500">시장 시점 신호와 추천 종목 불러오는 중</div>}
       {error && (
         <div className="rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300">
           오류: {error}

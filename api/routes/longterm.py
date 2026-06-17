@@ -152,6 +152,124 @@ async def get_current(session: AsyncSession = Depends(get_session)) -> CurrentSu
     )
 
 
+# ───────────────────────── 진입 시점(WHEN) 판단 ─────────────────────────
+# 백테스트 근거 [[project_contrarian_fear_entry]]: 중장기 수익은 "어떤 종목(WHAT)"
+# 만큼 "언제 진입(WHEN)"이 좌우. 현 추천은 near_52w_high 게이트라 항상 고점 근처
+# 에서만 종목을 내놓음 → 공포 구간 진입 타이밍을 별도 신호로 보여준다.
+
+class TimingOut(BaseModel):
+    tier: str               # extreme_fear | fear | pullback | neutral | greed
+    label: str              # 한글 배지
+    verdict: str            # optimal | good | ok | neutral | suboptimal
+    headline: str           # 한 줄 결론
+    vix: float | None
+    spy_drawdown_pct: float | None   # 52주 고점 대비 (음수)
+    regime_mode: str        # aggressive | neutral | defensive | unknown
+    reasons: list[str]      # 왜 그런지 (수치 근거)
+    action: str             # 진입한다면 어떻게
+    sizing: str             # 분할 제안
+
+
+def _compute_timing() -> dict:
+    """현재 시장의 진입 시점 등급 산출 (VIX + SPY 드로다운 + 레짐)."""
+    from scanner.benchmarks import get_benchmark_bars
+    from scanner.regime import evaluate_regime
+
+    # SPY 52주 고점 대비 드로다운
+    dd: float | None = None
+    spy = get_benchmark_bars("SPY", lookback_days=400)
+    if spy is not None and len(spy) >= 60:
+        high_252 = float(spy["high"].tail(252).max())
+        last = float(spy["close"].iloc[-1])
+        if high_252 > 0:
+            dd = last / high_252 - 1.0
+
+    # VIX — 직접 fetch, 실패 시 로컬 캐시 폴백 (공포 게이지 핵심 입력)
+    vix: float | None = None
+    vb = get_benchmark_bars("^VIX", lookback_days=30)
+    if vb is not None and not vb.empty:
+        vix = float(vb["close"].iloc[-1])
+    else:
+        try:
+            from backtests.data_cache import get_bars as _cache_bars
+            vb2 = _cache_bars("^VIX", "2024-01-01", date.today().isoformat())
+            if vb2 is not None and not vb2.empty:
+                vix = float(vb2["close"].iloc[-1])
+        except Exception:
+            pass
+
+    # 레짐 모드
+    mode = "unknown"
+    try:
+        mode = evaluate_regime().mode
+    except Exception:
+        pass
+
+    mode_kr = {"aggressive": "공격(상승)", "neutral": "중립", "defensive": "방어(하락)"}.get(mode, "확인 불가")
+    reasons: list[str] = []
+    if dd is not None:
+        reasons.append(f"S&P 500(SPY)이 52주 고점 대비 {dd*100:+.1f}%")
+    if vix is not None:
+        reasons.append(f"공포지수(VIX) {vix:.0f}" + (" — 극심한 공포" if vix > 30 else " — 안정" if vix < 16 else " — 다소 불안"))
+    reasons.append(f"시장 국면: {mode_kr}")
+
+    d = dd if dd is not None else 0.0
+    v = vix if vix is not None else 18.0
+
+    # 분류 (백테스트: VIX>30 & DD≤-15% = 역사적 최적 진입 구간)
+    if v > 30 and d <= -0.15:
+        tier, verdict = "extreme_fear", "optimal"
+        label = "🔥 극공포 — 최적 진입 구간"
+        headline = "역사적으로 가장 좋은 진입 시점입니다. 공포에 분할 매수하세요."
+        action = "지금이 적기입니다. 자본을 3분할로 나눠 아래 종목에 분할 진입하세요(한 번에 전량 금지)."
+        sizing = "1차 1/3 즉시 · 추가 하락마다 1/3씩 (총 3분할)"
+    elif (v > 25 and d <= -0.10) or d <= -0.15:
+        tier, verdict = "fear", "good"
+        label = "😨 공포 — 우호적 진입 구간"
+        headline = "진입에 유리한 구간입니다. 분할로 들어가세요."
+        action = "우호적입니다. 아래 종목에 분할 진입하되, 더 깊은 공포(VIX 30+/-15%)가 오면 추가 매수 여력을 남겨두세요."
+        sizing = "1차 1/3~1/2 · 추가 하락 시 잔여 분할"
+    elif d <= -0.07:
+        tier, verdict = "pullback", "ok"
+        label = "😐 조정 — 소량 분할 또는 대기"
+        headline = "얕은 조정입니다. 시점상 나쁘진 않지만 최적도 아닙니다."
+        action = "진입한다면 아래 종목을 소량 분할로. 본진은 더 깊은 공포 구간까지 현금 일부를 남겨두는 편이 유리합니다."
+        sizing = "소량(≤1/3) · 나머지 현금 대기"
+    elif v < 16 and d > -0.03:
+        tier, verdict = "greed", "suboptimal"
+        label = "🤑 고점·낙관 — 시점 비최적"
+        headline = "시점상 최적이 아닙니다(고점 근처·낮은 공포). 신규 자본은 서두르지 마세요."
+        action = "진입한다면 아래 종목이 후보지만, 신규 자본은 소량만 넣고 조정·공포 구간까지 분할 대기를 권장합니다."
+        sizing = "소량(≤1/3) 또는 공포 구간까지 대기"
+    else:
+        tier, verdict = "neutral", "neutral"
+        label = "😶 중립 — 평범한 시점"
+        headline = "시점은 평범합니다. 서두를 이유도, 피할 이유도 크지 않습니다."
+        action = "진입한다면 아래 종목을 소량·분할로. 본진 투입은 공포 구간을 기다리는 편이 데이터상 유리합니다."
+        sizing = "소량~중간 분할 · 본진은 대기"
+
+    # 추세추종 시스템의 구조적 모순 안내: 공포인데 방어모드면 추천 리스트가 비어있음
+    if verdict in ("optimal", "good") and mode == "defensive":
+        action += (
+            " ※ 참고: 현 추천 시스템은 추세추종이라 이 공포 구간에선 신규 종목을 내놓지 않습니다"
+            "(방어 모드). 직전 정상장의 추천 종목(아래 보유 목록)을 분할 진입 후보로 활용하세요."
+        )
+
+    return {
+        "tier": tier, "label": label, "verdict": verdict, "headline": headline,
+        "vix": round(vix, 1) if vix is not None else None,
+        "spy_drawdown_pct": round(dd * 100, 1) if dd is not None else None,
+        "regime_mode": mode, "reasons": reasons, "action": action, "sizing": sizing,
+    }
+
+
+@router.get("/timing", response_model=TimingOut)
+async def get_timing() -> TimingOut:
+    """현재 진입 시점 등급 — 공포/탐욕 기반 WHEN 신호 (블로킹 호출은 thread)."""
+    result = await asyncio.to_thread(_compute_timing)
+    return TimingOut(**result)
+
+
 @router.get("/history/{pick_month}", response_model=list[LongtermPickOut])
 async def get_history(
     pick_month: date, session: AsyncSession = Depends(get_session)

@@ -1251,6 +1251,26 @@ export async function fetchLongtermCurrent(): Promise<LongtermCurrent> {
   return res.json();
 }
 
+// 진입 시점(WHEN) 신호 — 공포/탐욕 기반
+export type LongtermTiming = {
+  tier: "extreme_fear" | "fear" | "pullback" | "neutral" | "greed";
+  label: string;
+  verdict: "optimal" | "good" | "ok" | "neutral" | "suboptimal";
+  headline: string;
+  vix: number | null;
+  spy_drawdown_pct: number | null;
+  regime_mode: "aggressive" | "neutral" | "defensive" | "unknown";
+  reasons: string[];
+  action: string;
+  sizing: string;
+};
+
+export async function fetchLongtermTiming(): Promise<LongtermTiming> {
+  const res = await fetch(`${API_BASE}/api/longterm/timing`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Longterm timing fetch failed: ${res.status}`);
+  return res.json();
+}
+
 export async function refreshLongterm(dryRun: boolean = false): Promise<{
   target_date: string;
   dry_run: boolean;
