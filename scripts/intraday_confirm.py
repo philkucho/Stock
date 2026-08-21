@@ -66,7 +66,14 @@ INTRADAY_PICK_CAP = int(os.environ.get("INTRADAY_PICK_CAP", "3"))         # top 
 
 
 def _gap_penalty(gap_pct: float) -> float:
-    """프리마켓 갭에 따른 sizing penalty."""
+    """프리마켓 갭에 따른 sizing penalty.
+
+    ⚠️ EP(Episodic Pivot) graduation 주의 (2026-06-15):
+    이 함수는 ORB 단타 전제(큰 갭 = 추격 리스크)로 갭>10%를 0배 거부한다.
+    그러나 EP 셋업은 갭≥8~10%가 *진입 신호의 핵심*이라 정반대다. EP가
+    backtests/run_ep.py 검증을 통과해 라이브로 승격되면 이 페널티를 EP 경로에서는
+    반전(큰 갭 = 가점/허용)해야 한다. ORB는 2026-06-05 폐기됨 — 현 swing 경로는 미사용.
+    """
     if gap_pct is None:
         return 1.0
     if gap_pct > 10.0:

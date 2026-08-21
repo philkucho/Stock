@@ -192,6 +192,97 @@ def two_stage_entry(spy, search_start, search_end):
     return [(s1, S1_WEIGHT), (s2, S2_WEIGHT)]
 
 
+# ── 손실 최소화(D) 변형 ──
+# 원칙: 하락 중엔 절대 물타기 금지. 단기추세가 위로 꺾인 게 확인된 날만,
+#       그리고 추세가 유지되는 동안에만 균등 분할. 추세 깨지면 추가매수 중단.
+LM_VIX, LM_DD = 30.0, -0.15      # 발동 게이트 (A2 1단과 동일 — 같은 공포에서 비교)
+LM_GAP = 15                      # 트랜치 최소 간격(거래일)
+LM_N = 3                         # 균등 3분할
+LM_STOP = -0.10                  # 1차 진입가 대비 -10% 이탈 시 추세전환 실패 → 청산(현금)
+
+
+def _turn_up_mask(spy):
+    """단기추세 상향전환: 종가가 MA10 위 & MA10이 3일 전보다 상승."""
+    ma10 = spy["close"].rolling(10).mean()
+    return (spy["close"] > ma10) & (ma10 > ma10.shift(3))
+
+
+def loss_min_entry(spy, search_start, search_end):
+    """[(진입일, 가중치)] — 공포 발동 + 추세 상향전환 확인된 날에만 균등 분할.
+
+    A2와 차이: ① 1차 진입도 '단기추세 상향전환' 확인을 요구(칼날 회피)
+               ② 추가 트랜치는 추세가 여전히 위일 때만(하락 중 물타기 금지).
+    """
+    vix = get_bars("^VIX", "2010-01-01", date.today().isoformat())
+    high_252 = spy["high"].rolling(252).max()
+    dd = spy["close"] / high_252 - 1.0
+    vix_al = vix["close"].reindex(spy.index, method="ffill")
+    turn = _turn_up_mask(spy)
+    confirmed = (vix_al > LM_VIX) & (dd <= LM_DD) & turn
+
+    win = spy.index[(spy.index >= search_start) & (spy.index <= search_end)]
+    conf_days = [t for t in win if bool(confirmed.loc[t])]
+    if not conf_days:
+        return []
+    idx = list(spy.index)
+    dates = [conf_days[0]]
+    last_pos = idx.index(conf_days[0])
+    while len(dates) < LM_N:
+        nxt = None
+        for pos in range(last_pos + LM_GAP, len(idx)):
+            ts = idx[pos]
+            if ts > search_end:
+                break
+            if bool(turn.loc[ts]):   # 추가매수는 추세 상향 유지 중에만
+                nxt = pos
+                break
+        if nxt is None:
+            break
+        dates.append(idx[nxt]); last_pos = nxt
+    w = 1.0 / len(dates)
+    return [(t, w) for t in dates]
+
+
+def lossmin_fwd_return_with_stop(symbols, bars_dict, w_tranches, months, stop=LM_STOP):
+    """손실최소화 forward 수익률: 1차 진입 후 바스켓이 stop 이탈하면 그 시점 청산(현금, 이후 0).
+
+    추세전환이 거짓이었을 때(칼날 재개) 꼬리손실을 자른다. 청산 후 재진입 없음.
+    """
+    if not w_tranches:
+        return None
+    t1 = w_tranches[0][0]
+    target = t1 + pd.DateOffset(months=months)
+    sym_rets = []
+    for s in symbols:
+        df = bars_dict.get(s)
+        if df is None:
+            continue
+        # 종목별 1차 진입가(스톱 기준) + 가중 평균 진입가
+        p1 = price_on_or_after(df, t1)
+        num = den = 0.0
+        for t, w in w_tranches:
+            p = price_on_or_after(df, t)
+            if p and p > 0:
+                num += w * p; den += w
+        if not p1 or p1 <= 0 or den == 0:
+            continue
+        avg_entry = num / den
+        path = df[(df.index >= t1) & (df.index <= target)]
+        if path.empty:
+            continue
+        # 스톱 체크: 1차 진입가 대비 -stop 이탈 시 그 종가로 청산
+        breached = path[path["close"] <= p1 * (1 + stop)]
+        if not breached.empty:
+            exit_p = float(breached.iloc[0]["close"])
+            sym_rets.append(exit_p / avg_entry - 1.0)
+        else:
+            rows = df[df.index >= target]
+            if rows.empty:
+                continue
+            sym_rets.append(float(rows.iloc[0]["close"]) / avg_entry - 1.0)
+    return sum(sym_rets) / len(sym_rets) if sym_rets else None
+
+
 def basket_weighted_fwd_return(symbols, bars_dict, w_tranches, months):
     """가중 분할진입(1/3, 2/3) forward 수익률. anchor = 1단일 + months."""
     if not w_tranches:
@@ -435,12 +526,18 @@ def run_auto():
             continue
         two_stage = two_stage_entry(spy, ss_ts, se_ts)
         tranches_base = staged_entry_dates(spy, ss_ts, se_ts)
+        lossmin = loss_min_entry(spy, ss_ts, se_ts)
         b_date = trend_reentry_date(spy, ss_ts)
 
         a2_12 = basket_weighted_fwd_return(watchlist, bars_dict, two_stage, 12)
         a2_dd = max_paper_dd_weighted(watchlist, bars_dict, two_stage)
         abase_12 = basket_staged_fwd_return(watchlist, bars_dict, tranches_base, 12)
         abase_dd = max_paper_drawdown(watchlist, bars_dict, tranches_base, se_ts)
+        d_12 = lossmin_fwd_return_with_stop(watchlist, bars_dict, lossmin, 12)
+        d_dd = max_paper_dd_weighted(watchlist, bars_dict, lossmin)
+        # E = A2 진입(빠른 5일선) + 보호 스톱(-12% / -15%)
+        e12_12 = lossmin_fwd_return_with_stop(watchlist, bars_dict, two_stage, 12, stop=-0.12)
+        e15_12 = lossmin_fwd_return_with_stop(watchlist, bars_dict, two_stage, 12, stop=-0.15)
         b_12 = None
         if b_date is not None:
             b_picks = build_watchlist(universe, bars_dict, b_date)
@@ -459,6 +556,11 @@ def run_auto():
             "Abase_12mo": abase_12,
             "Abase_dd": abase_dd,
             "Abase_fired": bool(tranches_base),
+            "D_12mo": d_12,
+            "D_dd": d_dd,
+            "D_n": len(lossmin),
+            "E12_12mo": e12_12,
+            "E15_12mo": e15_12,
             "B_12mo": b_12,
             "SPY_12mo": spy_ts_12,
         })
@@ -473,14 +575,16 @@ def main_auto():
     rows = run_auto()
     rows.sort(key=lambda r: r["peak"])
     hdr = (f"{'peak':>10} {'trough':>10} {'depth':>7} {'tag':>5} | "
-           f"{'A2 12mo':>8} {'A2 DD':>7} | {'Abase':>8} {'AbDD':>7} | {'B 12mo':>8} {'SPY':>8}")
+           f"{'A2 12mo':>8} {'A2 DD':>7} | {'A2+s12':>8} {'A2+s15':>8} | "
+           f"{'D 12mo':>8} {'D DD':>7} {'Dn':>3} | {'B 12mo':>8} {'SPY':>8}")
     print("\n" + hdr)
     print("-" * len(hdr))
     for r in rows:
         tag = "TUNE" if r["tuned"] else "OOS"
         print(f"{r['peak']:>10} {r['trough']:>10} {pct(r['depth']):>7} {tag:>5} | "
               f"{pct(r['A2_12mo']):>8} {pct(r['A2_dd']):>7} | "
-              f"{pct(r['Abase_12mo']):>8} {pct(r['Abase_dd']):>7} | "
+              f"{pct(r.get('E12_12mo')):>8} {pct(r.get('E15_12mo')):>8} | "
+              f"{pct(r['D_12mo']):>8} {pct(r['D_dd']):>7} {r['D_n']:>3} | "
               f"{pct(r['B_12mo']):>8} {pct(r['SPY_12mo']):>8}")
 
     # 집계: OOS만 따로
@@ -489,14 +593,18 @@ def main_auto():
         return (sum(vals) / len(vals)) if vals else None
     oos = [r for r in rows if not r["tuned"]]
     tune = [r for r in rows if r["tuned"]]
-    print("\n=== 발동 빈도 & 평균 12mo ===")
+    print("\n=== 발동 빈도 & 평균 (12mo 수익 / 최대평가손) ===")
     for label, subset in [("TUNED", tune), ("OOS", oos), ("ALL", rows)]:
         a2_fired = [r for r in subset if isinstance(r["A2_12mo"], (int, float))]
-        ab_fired = [r for r in subset if r.get("Abase_fired")]
-        a2 = agg(subset, "A2_12mo"); ab = agg(subset, "Abase_12mo"); b = agg(subset, "B_12mo")
+        d_fired = [r for r in subset if isinstance(r["D_12mo"], (int, float))]
+        a2 = agg(subset, "A2_12mo"); a2dd = agg(a2_fired, "A2_dd")
+        d = agg(subset, "D_12mo"); ddd = agg(d_fired, "D_dd")
+        e12 = agg(subset, "E12_12mo"); e15 = agg(subset, "E15_12mo")
+        b = agg(subset, "B_12mo")
         print(f"  {label:>6} (n={len(subset)}): "
-              f"A2 발동 {len(a2_fired)}/{len(subset)} avg {pct(a2)} | "
-              f"Abase 발동 {len(ab_fired)}/{len(subset)} avg {pct(ab)} | B avg {pct(b)}")
+              f"A2 {len(a2_fired)}/{len(subset)} ret {pct(a2)} maxDD {pct(a2dd)} | "
+              f"A2+stop12 {pct(e12)} | A2+stop15 {pct(e15)} | "
+              f"D ret {pct(d)} maxDD {pct(ddd)} | B {pct(b)}")
     print("\n" + json.dumps(rows, indent=2, default=str))
 
 

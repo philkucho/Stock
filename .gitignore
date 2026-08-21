@@ -65,3 +65,9 @@ htmlcov/
 # Backtest results (user generated)
 backtests/results/
 *.backtest.json
+
+.claude/worktrees/
+.claude/settings.local.json
+*.out
+backtests/*_log.txt
+backtests/*_result.json

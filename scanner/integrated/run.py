@@ -3110,9 +3110,17 @@ async def run_integrated(
 
 # ─────────── Swing open-market mode (2026-06-05 도입, ORB 폐지 후속) ───────────
 
-SWING_ATR_PCT_CAP = 5.0  # ATR_pct > 5% 종목 제외 (ARM 등 고변동성 cap)
+SWING_ATR_PCT_CAP = 8.0  # ATR_pct > 8% 종목 제외 (2026-06-15: 5%→8% 완화 — Qullamaggie 고ADR
+                         # 리더(MRVL ATR7.5%/+237% 등)를 5% 캡이 막던 문제. 리스크는 0.5% 사이징+stop이 통제.
+                         # 8%+ 극단만 차단(오버나이트 갭 보호). 완전 제거하려면 None + run_swing_picks 분기.
 SWING_ATR_MULT_STOP = 2.0  # entry - 20일 ATR × 2 = stop
 SWING_HOLD_DAYS = 5
+
+# Momentum quality 하드 게이트 (2026-06-15 도입, Qullamaggie/Minervini 원형)
+# 저변동성 메가캡(AAPL/MSFT 등)을 배제하고 진짜 모멘텀 리더만 진입.
+SWING_ADR_PCT_MIN = 4.0            # ADR(20) ≥ 4% — 평균 일중 변동폭
+SWING_PRIOR_MOVE_MIN_PCT = 30.0   # 직전 1/2/3개월 중 최고 close-to-close ≥ +30%
+SWING_PRIOR_MOVE_LOOKBACKS = (21, 42, 63)  # 거래일 ≈ 1/2/3개월
 
 
 async def run_swing_picks(
@@ -3133,6 +3141,7 @@ async def run_swing_picks(
       - Entry: 09:30 시장가
       - Stop : entry - 20일 ATR × atr_mult_stop
       - Filter: ATR_pct > atr_pct_cap → 제외 (ARM류 고변동성 차단)
+      - Gate  : ADR(20) ≥ 4% AND 직전 1~3개월 모멘텀 ≥ +30% (2026-06-15 Qullamaggie 하드 게이트)
       - Exit  : 5영업일 후 종가 강제 (monitor 처리)
       - Top N : preopen 단계 (5-Model Intraday Stack) 우회, v10 알파를 직접 사용
 
@@ -3150,7 +3159,8 @@ async def run_swing_picks(
         return []
 
     end_iso = today.isoformat()
-    start_iso = (today - timedelta(days=60)).isoformat()
+    # 130일(≈90거래일) — 3개월(63거래일) prior-move 계산 + ATR/ADR 여유
+    start_iso = (today - timedelta(days=130)).isoformat()
 
     out: list[PickCandidate] = []
     skipped: list[dict] = []
@@ -3174,6 +3184,33 @@ async def run_swing_picks(
                 })
                 continue
 
+            # ── Momentum quality 하드 게이트 (Qullamaggie/Minervini) ──
+            # G1: ADR(20) ≥ 4% — 저변동 메가캡 배제 (ATR과 별개, high/low 단순비)
+            recent = bars.tail(20)
+            adr_pct_v = float(((recent["high"] / recent["low"] - 1.0) * 100.0).mean())
+            if adr_pct_v < SWING_ADR_PCT_MIN:
+                skipped.append({
+                    "symbol": vp.symbol,
+                    "reason": f"adr {adr_pct_v:.2f}% < {SWING_ADR_PCT_MIN}%",
+                })
+                continue
+
+            # G2: 직전 1~3개월 모멘텀 — 최고 close-to-close가 floor 미만이면 탈락
+            closes = bars["close"]
+            last_close = float(closes.iloc[-1])
+            prior_moves = [
+                (last_close / float(closes.iloc[-1 - k]) - 1.0) * 100.0
+                for k in SWING_PRIOR_MOVE_LOOKBACKS
+                if len(closes) > k
+            ]
+            best_move = max(prior_moves) if prior_moves else 0.0
+            if best_move < SWING_PRIOR_MOVE_MIN_PCT:
+                skipped.append({
+                    "symbol": vp.symbol,
+                    "reason": f"prior_move {best_move:.1f}% < {SWING_PRIOR_MOVE_MIN_PCT}%",
+                })
+                continue
+
             stop_dist = atr_v * atr_mult_stop
             provisional_stop = entry_ref - stop_dist
             if provisional_stop <= 0:
@@ -3190,6 +3227,8 @@ async def run_swing_picks(
                 "v10_meta": v10_meta,
                 "atr": round(atr_v, 4),
                 "atr_pct": round(atr_pct_v, 3),
+                "adr_pct": round(adr_pct_v, 3),
+                "prior_move_pct": round(best_move, 2),
                 "atr_mult_stop": atr_mult_stop,
                 "provisional_entry": round(entry_ref, 4),
                 "provisional_stop": round(provisional_stop, 4),
